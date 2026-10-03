@@ -249,7 +249,8 @@ def test_extract_keeps_markdown_as_document_and_schedules_graph(project,monkeypa
     monkeypatch.setattr(ai,'stream_completion',stream)
     ai.extract(job)
     result=db.get(job['id']+'-extract')['data']
-    assert result['text']=='# 问题记录\n\n原文未提供回答'
+    assert result['text'].split('\n\n## 原文来源索引')[0]=='# 问题记录\n\n原文未提供回答'
+    assert '```' not in result['text'] and '[00:00:00]' in result['text']
     assert result['state']=='complete'
     assert any(j['data']['kind']=='diagram' for j in db.records('job',pid))
 

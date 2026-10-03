@@ -4,6 +4,7 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from cryptography.fernet import Fernet
@@ -34,6 +35,25 @@ def encrypt(key):
     return cipher().encrypt(key.encode()).decode()
 
 
+class OutputLimit(RuntimeError):
+    def __init__(self,budget):
+        self.budget=budget
+        super().__init__(f'AI 单次输出达到本次请求上限（{budget:,} tokens）。已保存生成进度；可在 AI 接口设置中提高输出上限或关闭思考模式后重试。')
+
+
+def completion_options(provider,requested):
+    official=urlparse(provider['base_url']).hostname=='api.deepseek.com'
+    mode=provider.get('thinking_mode','auto')
+    options={}
+    if mode in ('enabled','disabled'):
+        options['thinking']={'type':mode}
+    elif mode=='auto' and official and provider['model'] in ('deepseek-flash','deepseek-v4-pro'):
+        options['thinking']={'type':'disabled'}
+    thinking=mode=='enabled' or (official and mode=='provider')
+    options['max_tokens']=provider.get('max_output_tokens') or (max(requested,32768) if thinking else requested)
+    return options
+
+
 def stream_completion(provider_id,messages,jid=None,max_tokens=6000):
     provider=db.get(provider_id)
     if not provider or provider["kind"]!="provider":
@@ -44,7 +64,24 @@ def stream_completion(provider_id,messages,jid=None,max_tokens=6000):
     url=base if base.endswith("/chat/completions") else base+"/chat/completions"
     headers={"Content-Type":"application/json"}
     if secret: headers["Authorization"]="Bearer "+secret
-    body={"model":d["model"],"messages":messages,"stream":True,"max_tokens":max_tokens}
+    options=completion_options(d,max_tokens)
+    body={"model":d["model"],"messages":messages,"stream":True,**options}
+    budget=options['max_tokens']
+    usage={};reason=None;content_chars=0;reasoning_chars=0
+    def record():
+        if not jid:return
+        with db.transaction() as c:
+            job=db.get(jid,c)
+            if not job:return
+            calls=job['data'].get('api_calls',[])
+            calls.append({'time':time.time(),'model':d['model'],'max_tokens':budget,
+                'thinking_mode':options.get('thinking',{}).get('type','provider'),
+                'finish_reason':reason,'content_chars':content_chars,'reasoning_chars':reasoning_chars,
+                'usage':{k:usage[k] for k in ('prompt_tokens','completion_tokens','total_tokens','completion_tokens_details') if k in usage}})
+            db.update(c,jid,{'api_calls':calls[-80:]})
+    def check_finish():
+        if reason=='length':raise OutputLimit(budget)
+        if reason not in (None,'stop'):raise RuntimeError(f'AI 提前结束输出（{reason}），已保存生成进度，请重试')
     yielded=False
     for attempt in range(3):
         if jid: check_cancel(jid)
@@ -61,9 +98,15 @@ def stream_completion(provider_id,messages,jid=None,max_tokens=6000):
                         raise RuntimeError(f"AI 接口返回 HTTP {response.status_code}，请检查地址、模型、额度或密钥")
                     finished=False
                     if "application/json" in response.headers.get("content-type",""):
-                        content=json.loads(response.read())["choices"][0]["message"].get("content","")
+                        payload=json.loads(response.read());choice=payload['choices'][0]
+                        reason=choice.get('finish_reason');usage=payload.get('usage') or {}
+                        content=choice['message'].get('content','')
+                        reasoning_chars=len(choice['message'].get('reasoning_content') or '')
                         if content:
+                            content_chars+=len(content)
                             yielded=True;yield content
+                        record();check_finish()
+                        if not yielded:raise RuntimeError('AI 返回空内容')
                         return
                     for line in response.iter_lines():
                         if jid: check_cancel(jid)
@@ -74,15 +117,18 @@ def stream_completion(provider_id,messages,jid=None,max_tokens=6000):
                         try: payload=json.loads(value)
                         except ValueError: continue
                         if "error" in payload: raise RuntimeError("AI 返回错误，请检查模型和接口配置")
+                        if payload.get('usage'):usage=payload['usage']
                         choices=payload.get("choices") or []
                         if not choices: continue
                         choice=choices[0]
-                        if choice.get("finish_reason")=="length":
-                            raise RuntimeError("AI 输出达到长度限制，已保存已生成内容，请缩小提取范围后重试")
-                        if choice.get("finish_reason"): finished=True
+                        if choice.get("finish_reason"):
+                            finished=True;reason=choice['finish_reason']
+                        reasoning_chars+=len(choice.get('delta',{}).get('reasoning_content') or '')
                         delta=choice.get("delta",{}).get("content","")
                         if isinstance(delta,str) and delta:
+                            content_chars+=len(delta)
                             yielded=True;yield delta
+                    record();check_finish()
                     if not finished: raise RuntimeError("AI 连接提前中断，已保留原文及生成进度")
                     if not yielded: raise RuntimeError("AI 返回空内容")
                     return
@@ -93,7 +139,13 @@ def stream_completion(provider_id,messages,jid=None,max_tokens=6000):
 
 
 def completion(provider_id,messages,jid=None,max_tokens=6000):
-    return "".join(stream_completion(provider_id,messages,jid,max_tokens))
+    parts=[]
+    try:
+        for part in stream_completion(provider_id,messages,jid,max_tokens):parts.append(part)
+    except OutputLimit as exc:
+        exc.partial=''.join(parts)
+        raise
+    return ''.join(parts)
 
 
 def validate_revision(text,evidence):
@@ -221,6 +273,8 @@ def revise(job):
 
 def artifact(job,kind):
     key=f"{job['id']}-{kind}"
+    if kind=="extract" and job["data"].get("attempt",0)>1:
+        key+=f"-attempt-{job['data']['attempt']}"
     prior=db.get(key)
     if prior and prior["data"].get("manual"):
         key=key+"-"+str(job["data"].get("attempt",1))
@@ -232,44 +286,8 @@ def artifact(job,kind):
 
 
 def extract(job):
-    pid=job["project_id"];jid=job["id"];payload=job["data"]["payload"]
-    provider=payload["provider_id"]
-    a=artifact(job,"extract")
-    db.patch(jid,{"stage":"整理全文上下文"})
-    # Snapshot text and source revision before any API request.
-    with db.transaction() as c:
-        p=db.get(pid,c)
-        source_revision=p["data"]["transcript_revision"]
-        rows=transcript(pid)
-        db.update(c,a["id"],{"source_revision":source_revision})
-        payload["source_revision"]=source_revision
-        db.update(c,jid,{"payload":payload})
-    text=compress(provider,rows,jid)
-    template=payload.get("template","会议纪要")
-    instructions={"会议纪要":"包含概览、议题与讨论、确定的结论、待确认事项、行动清单（负责人和截止日期无依据就写未指定）。",
-        "内容摘要":"归纳主题、核心要点、关键数字和仍有分歧的事项。",
-        "面试记录":"只整理材料实际出现的自我介绍、问题、回答和追问。严格区分问题与回答；无回答写原文未提供回答，不替受访者回答，不补专业知识，不凭空评分。每项保留原始时间码。",
-        "行动清单":"逐项列出明确的任务、负责人、截止时间及原始时间码；未确认的任务另列。"}
-    messages=[{"role":"system","content":GROUNDING},
-        {"role":"user","content":f"根据下面的全文材料生成{template}，使用 Markdown。{instructions.get(template,'按自定义要求提取。')}为重要结论保留原始时间码。时间码只允许逐字复制材料已有的段首时间，禁止推算句内时间；无法定位写[时间码待核对]。不要把整个文档放入代码围栏。\n用户要求：{payload.get('instruction','')}\n全文：\n{text}"}]
-    db.patch(jid,{"stage":"正在生成内容提取","progress":.35})
-    output="";last=0
-    try:
-        for part in stream_completion(provider,messages,jid,max_tokens=10000):
-            output+=part
-            if time.monotonic()-last>.25:
-                db.patch(a["id"],{"text":output});last=time.monotonic()
-        # Some compatible models wrap the whole document in a Markdown code fence.
-        # Unwrap only that outer fence, preserving intentional fenced blocks within it.
-        wrapped=re.fullmatch(r"\s*```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*",output)
-        if wrapped: output=wrapped.group(1)
-        output=source_timestamps(output,rows)
-        db.patch(a["id"],{"text":output,"state":"complete"})
-    except BaseException:
-        db.patch(a["id"],{"text":output,"state":"failed"})
-        raise
-    with db.transaction() as c:
-        db.new_job(c,pid,"diagram",{**payload,"extract_id":a["id"]},a["id"])
+    from .extraction import extract as run_extraction
+    return run_extraction(job)
 
 
 def parse_graph(raw):
@@ -342,7 +360,14 @@ def diagram(job):
     db.patch(jid,{"stage":"正在生成图表结构","progress":.3})
     try:
         for attempt in range(2):
-            raw=completion(payload["provider_id"],messages,jid,max_tokens=7000)
+            try:
+                raw=completion(payload["provider_id"],messages,jid,max_tokens=10000)
+            except OutputLimit as exc:
+                db.patch(a['id'],{'raw_draft':getattr(exc,'partial','')})
+                if attempt:raise
+                db.patch(jid,{'stage':'图谱输出受限，正在减少节点重试'})
+                messages.append({'role':'user','content':'上次输出过长。请仅保留最重要的最多12个节点，每个标签不超过20字，输出一个完整、有效的JSON对象。不要附解释。'})
+                continue
             try:
                 graph=parse_graph(raw)
                 break

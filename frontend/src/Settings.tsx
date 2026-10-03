@@ -26,6 +26,8 @@ export default function Settings({
     [url, setUrl] = useState(""),
     [model, setModel] = useState(""),
     [key, setKey] = useState(""),
+    [maxOutput, setMaxOutput] = useState(""),
+    [thinking, setThinking] = useState("auto"),
     [busy, setBusy] = useState(false),
     [test, setTest] = useState("");
   function choose(p: Rec | null) {
@@ -34,6 +36,10 @@ export default function Settings({
     setUrl(p?.data.base_url || "");
     setModel(p?.data.model || "");
     setKey("");
+    setMaxOutput(
+      p?.data.max_output_tokens ? String(p.data.max_output_tokens) : "",
+    );
+    setThinking(p?.data.thinking_mode || "auto");
     setTest("");
   }
   async function save() {
@@ -48,6 +54,8 @@ export default function Settings({
           model,
           api_key: key,
           version: selected?.version,
+          max_output_tokens: maxOutput ? Number(maxOutput) : null,
+          thinking_mode: thinking,
         },
       );
       await refresh();
@@ -175,6 +183,43 @@ export default function Settings({
                 }
               />
             </label>
+            <details className="provider-generation-options">
+              <summary>生成长度与思考模式</summary>
+              <label>
+                单次输出上限（tokens）
+                <input
+                  type="number"
+                  min={128}
+                  max={393216}
+                  step={1}
+                  value={maxOutput}
+                  onChange={(e) => setMaxOutput(e.target.value)}
+                  placeholder="留空：根据任务自动分配"
+                />
+                <small>
+                  与模型上下文容量不同；部分模型的思考也会占用输出预算。提高上限可能增加耗时与用量。
+                </small>
+              </label>
+              <label>
+                思考模式
+                <select
+                  value={thinking}
+                  onChange={(e) => setThinking(e.target.value)}
+                >
+                  <option value="auto">
+                    自动（DeepSeek 整理任务关闭思考）
+                  </option>
+                  <option value="provider">跟随模型默认</option>
+                  <option value="enabled">开启思考</option>
+                  <option value="disabled">关闭思考</option>
+                </select>
+                <small>
+                  自动模式仅对官方 DeepSeek Flash / V4 Pro
+                  设置关闭思考；其他接口保持默认。手动开启或关闭需接口支持
+                  thinking 参数。
+                </small>
+              </label>
+            </details>
             <div className="form-actions">
               {selected && (
                 <button
@@ -187,7 +232,16 @@ export default function Settings({
               )}
               <button
                 className="button primary"
-                disabled={busy || !name || !url || !model}
+                disabled={
+                  busy ||
+                  !name ||
+                  !url ||
+                  !model ||
+                  (Boolean(maxOutput) &&
+                    (!Number.isInteger(Number(maxOutput)) ||
+                      Number(maxOutput) < 128 ||
+                      Number(maxOutput) > 393216))
+                }
                 onClick={() => void save()}
               >
                 {busy ? (

@@ -2114,6 +2114,27 @@ p {
   color: #a6b4c8;
   font-size: 9px;
 }
+.provider-generation-options {
+  margin: 8px 0 18px;
+  padding: 12px;
+  background: #f7f9fd;
+  border: 1px solid #e6ecf7;
+  border-radius: 8px;
+}
+.provider-generation-options summary {
+  cursor: pointer;
+  color: #6280aa;
+  font-size: 12px;
+}
+.provider-generation-options[open] summary {
+  margin-bottom: 15px;
+}
+.provider-generation-options label:last-child {
+  margin-bottom: 0;
+}
+.provider-generation-options small {
+  line-height: 1.7;
+}
 .form-actions {
   display: flex;
   justify-content: flex-end;

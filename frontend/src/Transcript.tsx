@@ -718,6 +718,9 @@ export default function Transcript({
                       生成中断，已保留输出，可在任务区重试。
                     </div>
                   )}
+                  {current.data.notice && (
+                    <div className="notice">{current.data.notice}</div>
+                  )}
                 </>
               )
             ) : (

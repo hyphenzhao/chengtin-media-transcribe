@@ -9,6 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse, quote
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -614,6 +615,8 @@ class ProviderIn(BaseModel):
     model: str = Field(min_length=1,max_length=200)
     api_key: str = Field(default="",max_length=4000)
     version: int | None = None
+    max_output_tokens: int | None = Field(default=None,ge=128,le=393216)
+    thinking_mode: Literal['auto','provider','enabled','disabled'] = 'auto'
 
 
 def provider_data(body, existing=None):
@@ -623,7 +626,9 @@ def provider_data(body, existing=None):
     if parsed.scheme not in ("https","http") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise HTTPException(422,"请输入完整的 HTTP(S) 接口地址")
     secret=encrypt(body.api_key) if body.api_key else (existing or {}).get("secret",encrypt(""))
-    return {"name":body.name,"base_url":url,"model":body.model,"secret":secret,"has_key":bool(body.api_key or (existing or {}).get("has_key"))}
+    return {"name":body.name,"base_url":url,"model":body.model,"secret":secret,"has_key":bool(body.api_key or (existing or {}).get("has_key")),
+        'max_output_tokens':body.max_output_tokens if 'max_output_tokens' in body.model_fields_set else (existing or {}).get('max_output_tokens'),
+        'thinking_mode':body.thinking_mode if 'thinking_mode' in body.model_fields_set else (existing or {}).get('thinking_mode','auto')}
 
 
 @app.post("/api/providers")
