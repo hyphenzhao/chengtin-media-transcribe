@@ -22,6 +22,7 @@ import {
   HardDrive,
   LoaderCircle,
   Maximize2,
+  MessageCircle,
   Minimize2,
   MoreHorizontal,
   NotebookPen,
@@ -41,6 +42,7 @@ import {
 } from "lucide-react";
 import { api, type Rec, type Snapshot, size, stamp, uploadFile } from "./api";
 import Notes from "./Notes";
+import RecordingChat from "./RecordingChat";
 import Transcript from "./Transcript";
 import Diagram from "./Diagram";
 import Settings from "./Settings";
@@ -56,6 +58,7 @@ export default function App() {
     [trash, setTrash] = useState(false),
     [middleTab, setMiddleTab] = useState("source"),
     [textTab, setTextTab] = useState("text"),
+    [upperTab, setUpperTab] = useState("notes"),
     [health, setHealth] = useState<any>(null),
     [connected, setConnected] = useState(true),
     [titleEditing, setTitleEditing] = useState(false),
@@ -1019,13 +1022,40 @@ export default function App() {
       >
         <section className="notes-panel">
           <header className="panel-heading">
-            <NotebookPen size={17} />
-            <h2>补充内容</h2>
-            <span className="subtle-tag">参考笔记</span>
+            <div
+              className="tabs upper-tabs"
+              role="tablist"
+              aria-label="补充内容与录音问答"
+            >
+              <button
+                role="tab"
+                aria-selected={upperTab === "notes"}
+                className={upperTab === "notes" ? "active" : ""}
+                onClick={() => setUpperTab("notes")}
+              >
+                <NotebookPen size={15} />
+                补充内容
+              </button>
+              <button
+                role="tab"
+                aria-selected={upperTab === "chat"}
+                className={`${upperTab === "chat" ? "active" : ""} ${!snap?.artifacts.some((a) => a.data.kind === "extract" && a.data.state === "complete") ? "muted-tab" : ""}`}
+                onClick={() => setUpperTab("chat")}
+              >
+                <MessageCircle size={15} />
+                内容问答
+              </button>
+            </div>
             <span className="grow" />
             <button
               className="icon-button"
-              title={rightMax === "notes" ? "恢复布局" : "放大补充内容"}
+              title={
+                rightMax === "notes"
+                  ? "恢复布局"
+                  : upperTab === "chat"
+                    ? "放大内容问答"
+                    : "放大补充内容"
+              }
               onClick={() => setRightMax(rightMax === "notes" ? "" : "notes")}
             >
               {rightMax === "notes" ? (
@@ -1036,7 +1066,7 @@ export default function App() {
             </button>
             <button
               className="icon-button"
-              title="收起补充内容"
+              title={upperTab === "chat" ? "收起内容问答" : "收起补充内容"}
               onClick={() => setRightMax(rightMax === "text" ? "" : "text")}
             >
               <PanelBottomClose size={15} />
@@ -1044,18 +1074,37 @@ export default function App() {
           </header>
           {rightMax !== "text" &&
             (snap ? (
-              <Notes
-                key={pid}
-                pid={pid}
-                value={snap.project.data.notes}
-                version={snap.project.data.notes_version || 0}
-                assets={snap.assets.filter((a) => a.data.role === "supplement")}
-                refresh={() => void refresh()}
-                error={error}
-              />
+              upperTab === "chat" ? (
+                <RecordingChat
+                  key={pid}
+                  snap={snap}
+                  seek={seek}
+                  refresh={() => void refresh()}
+                  error={error}
+                  onExtract={() => {
+                    setTextTab("extract");
+                    setRightMax("");
+                  }}
+                  onConfigure={() => setSettingsOpen(true)}
+                />
+              ) : (
+                <Notes
+                  key={pid}
+                  pid={pid}
+                  value={snap.project.data.notes}
+                  version={snap.project.data.notes_version || 0}
+                  assets={snap.assets.filter(
+                    (a) => a.data.role === "supplement",
+                  )}
+                  refresh={() => void refresh()}
+                  error={error}
+                />
+              )
             ) : (
               <div className="notes-placeholder">
-                为想法留一处空间。
+                {upperTab === "chat"
+                  ? "完成内容提取后，可在这里询问录音内容。"
+                  : "为想法留一处空间。"}
                 <br />
                 <span>新建项目后，可以写笔记、放图片、添加音视频。</span>
               </div>

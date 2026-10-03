@@ -103,7 +103,7 @@ def snapshot(pid: str):
     with db.engine.connect() as c:
         c.exec_driver_sql("BEGIN")
         result = {"project": db.get(pid, c)}
-        for kind in ("asset", "block", "segment", "speaker", "evidence", "job", "artifact"):
+        for kind in ("asset", "block", "segment", "speaker", "evidence", "job", "artifact", "chat"):
             rows = db.records(kind, pid, c)
             if kind == "segment":
                 # Keep both model outputs persisted; load on demand for the audit drawer.
@@ -503,6 +503,54 @@ def edit_artifact(aid: str, body: Revision):
     if a['data']['state']=='generating':
         raise HTTPException(409,"请等待生成完成后编辑")
     return db.patch(aid,{"text":str(body.data.get("text","")),"manual":True},body.version)
+
+
+class ChatQuestion(BaseModel):
+    question: str = Field(min_length=1,max_length=2000)
+    request_id: str = Field(pattern=r'^[a-zA-Z0-9_-]{8,80}$')
+
+
+@app.post('/api/projects/{pid}/chat')
+def ask_recording(pid: str,body: ChatQuestion):
+    from .ai import transcript
+    active_project(pid)
+    question=body.question.strip()
+    if not question:raise HTTPException(422,'请输入问题')
+    cid=hashlib.sha256(f'{pid}:chat:{body.request_id}'.encode()).hexdigest()
+    with db.transaction() as c:
+        # A repeated network request must not add a second question or charge twice.
+        existing=db.get(cid,c)
+        if existing:
+            if existing['data']['question']!=question:raise HTTPException(409,'请求编号已使用，请重新发送问题')
+            return existing
+        p=db.get(pid,c)
+        extracts=[a for a in db.records('artifact',pid,c) if a['data']['kind']=='extract' and a['data']['state']=='complete']
+        if not extracts:raise HTTPException(409,'请先在正文区域完成一次内容提取，再使用内容问答')
+        provider=p['data']['settings'].get('provider_id')
+        config=db.get(provider or '',c)
+        if not config or config['kind']!='provider':raise HTTPException(422,'请先配置并在项目中选择 AI 接口')
+        jobs=db.records('job',pid,c)
+        if any(j['data']['state'] in ('queued','running') and j['data']['kind'] in ('chat','transcribe','revise','diarize') for j in jobs):
+            raise HTTPException(409,'请等待当前回答或正文处理完成后再提问')
+        rows=transcript(pid,conn=c)
+        if not rows:raise HTTPException(409,'当前项目没有可供问答的正文')
+        source=extracts[-1]
+        revision=p['data']['transcript_revision']
+        history=[];length=0
+        for turn in reversed(db.records('chat',pid,c)):
+            d=turn['data']
+            if d['state']!='complete' or d['source_revision']!=revision:continue
+            item={'问题':d['question'],'回答':d['text']}
+            length+=len(d['question'])+len(d['text'])
+            if length>12000 or len(history)>=6:break
+            history.insert(0,item)
+        # Store an immutable text-only snapshot; never include project notes or attachments.
+        db.insert(c,'chat_context',{'rows':rows,'extract':source['data']['text'],
+            'extract_stale':source['data']['source_revision']!=revision,'history':history},pid,cid+'-context')
+        job=db.new_job(c,pid,'chat',{'chat_id':cid,'provider_id':provider},cid)
+        return db.insert(c,'chat',{'question':question,'text':'','state':'queued','job_id':job['id'],
+            'source_revision':revision,'extract_id':source['id'],'extract_version':source['version'],
+            'citations':[]},pid,cid)
 
 
 @app.get("/api/providers")

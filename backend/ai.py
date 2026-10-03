@@ -112,9 +112,9 @@ def stamp(seconds):
     return f"{seconds//3600:02}:{seconds%3600//60:02}:{seconds%60:02}"
 
 
-def transcript(pid,before=None):
-    blocks=sorted(db.records("block",pid),key=lambda b:b["data"]["start"])
-    speakers={s["id"]:s["data"]["name"] for s in db.records("speaker",pid)}
+def transcript(pid,before=None,conn=None):
+    blocks=sorted(db.records("block",pid,conn),key=lambda b:b["data"]["start"])
+    speakers={s["id"]:s["data"]["name"] for s in db.records("speaker",pid,conn)}
     rows=[]
     for b in blocks:
         d=b["data"]
@@ -369,3 +369,82 @@ def metadata(job):
             db.update(c,pid,{kind:result[:160] if kind=="title" else result})
         else:
             db.update(c,pid,{kind+"_suggestion":result})
+
+
+def question_evidence(provider,rows,question,history,jid):
+    """For long recordings, find actual quotes across every part, not summary guesses."""
+    if len('\n\n'.join(rows))<=14000:return rows
+    batches=[];batch=[];size=0
+    for row in rows:
+        heading,_,body=row.partition('\n')
+        for start in range(0,len(body),10000):
+            part=heading+'\n'+body[start:start+10000]
+            if batch and size+len(part)>14000:
+                batches.append(batch);batch=[];size=0
+            batch.append(part);size+=len(part)
+    if batch:batches.append(batch)
+    matches=[]
+    for index,parts in enumerate(batches):
+        db.patch(jid,{'stage':f'查找相关原文 {index+1}/{len(batches)}','progress':.1+.5*index/len(batches)})
+        prompt={'用户问题':question,'最近对话':history,'本批正文':parts}
+        messages=[{'role':'system','content':GROUNDING+'\n你负责检索，不回答问题。仅返回 JSON：{"quotes":[{"time":"00:00:00","text":"逐字原文"}]}。挑出与用户当前问题相关的原话，最多12条，每条不超过800字。text必须逐字复制本批正文，time必须复制对应段首时间。无相关内容返回空quotes数组。'},
+            {'role':'user','content':json.dumps(prompt,ensure_ascii=False)}]
+        raw=completion(provider,messages,jid,max_tokens=6000)
+        try:
+            data=json.loads(re.sub(r'^```(?:json)?\s*|\s*```$','',raw.strip()))
+            quotes=data['quotes']
+            if not isinstance(quotes,list):raise ValueError()
+        except (ValueError,KeyError,TypeError):
+            raise RuntimeError('AI 未返回可核对的原文片段，请重试或更换模型') from None
+        for quote in quotes[:12]:
+            if not isinstance(quote,dict):continue
+            timestamp=quote.get('time','');text=quote.get('text','')
+            if not isinstance(text,str) or not 2<=len(text)<=800:continue
+            # Validate both the quote and its associated timestamp against original text.
+            if any(part.startswith('['+str(timestamp)+']') and text in part.partition('\n')[2] for part in parts):
+                row=f'[{timestamp}] {text}'
+                if row not in matches:matches.append(row)
+    # Bound the final context using original quotes; never substitute generated evidence.
+    if len('\n\n'.join(matches))>20000:
+        query=question+' '+(' '.join(h['问题'] for h in history[-1:]))
+        terms=set(re.findall(r'[a-zA-Z0-9]{2,}|[\u4e00-\u9fff]{2}',query.lower()))
+        ordered=sorted(enumerate(matches),key=lambda pair:sum(term in pair[1].lower() for term in terms),reverse=True)
+        selected=[];size=0
+        for index,row in ordered:
+            if size+len(row)>20000:continue
+            selected.append((index,row));size+=len(row)
+        return [row for _,row in sorted(selected)]
+    return matches
+
+
+def chat(job):
+    jid=job['id'];payload=job['data']['payload'];cid=payload['chat_id']
+    turn=db.get(cid);context=db.get(cid+'-context')['data']
+    rows=context['rows'];provider=payload['provider_id']
+    db.patch(cid,{'state':'generating','text':'','citations':[]})
+    output='';last=0
+    try:
+        evidence=question_evidence(provider,rows,turn['data']['question'],context['history'],jid)
+        overview=context['extract'][:6000]
+        if len(context['extract'])>6000:overview+='\n（导航节选；回答依据为检索到的正文。）'
+        prompt={'当前问题':turn['data']['question'],'最近对话（只用于理解追问，不是事实依据）':context['history'],
+            '提取结果（仅供导航，不作为原话证据）':overview,'提取结果是否已过期':context['extract_stale'],
+            '可核对的正文':evidence or ['未检索到相关原文；请说明未找到依据，不要根据提取结果猜测回答。']}
+        messages=[{'role':'system','content':GROUNDING+'\n你是录音内容问答助手，回答当前问题，只根据可核对的正文。提取结果和历史回答可能有误，不能代替正文证据。没有依据就明确说“录音正文中未找到相关信息”；没有回答的题目不要替当事人作答。用简洁 Markdown 作答，在有依据的要点后引用原文段首 [HH:MM:SS]，只复制已有时间码，不推算句内时间。不要输出外部链接或整个文档的代码围栏。'},
+            {'role':'user','content':json.dumps(prompt,ensure_ascii=False)}]
+        db.patch(jid,{'stage':'正在回答','progress':.65})
+        for part in stream_completion(provider,messages,jid,max_tokens=6000):
+            output+=part
+            if time.monotonic()-last>.25:
+                db.patch(cid,{'text':source_timestamps(output,rows)});last=time.monotonic()
+        if not output.strip():raise RuntimeError('AI 未返回回答，请重试或检查接口配置')
+        wrapped=re.fullmatch(r'\s*```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*',output)
+        if wrapped:output=wrapped.group(1)
+        output=source_timestamps(output,rows)
+        references=list(dict.fromkeys(re.findall(r'\d{2}:\d{2}:\d{2}',output)))
+        allowed={row[1:9] for row in rows if re.match(r'^\[\d{2}:\d{2}:\d{2}\]',row)}
+        citations=[{'label':t,'time':sum(int(v)*m for v,m in zip(t.split(':'),(3600,60,1)))} for t in references if t in allowed]
+        db.patch(cid,{'text':output,'state':'complete','citations':citations})
+    except BaseException:
+        db.patch(cid,{'text':source_timestamps(output,rows),'state':'failed'})
+        raise

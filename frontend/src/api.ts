@@ -16,6 +16,7 @@ export type Snapshot = {
   evidences: Rec[];
   jobs: Rec[];
   artifacts: Rec[];
+  chats: Rec[];
   event_cursor: number;
 };
 export async function api<T = any>(

@@ -1042,6 +1042,232 @@ p {
   font-size: 11px;
   color: #b3bed0;
 }
+
+/* The upper pane shares its space between local notes and recording Q&A. */
+.upper-tabs {
+  height: 100%;
+  gap: 18px;
+  min-width: 0;
+}
+.upper-tabs button {
+  height: 100%;
+  padding: 0 0 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.upper-tabs button.muted-tab {
+  color: #a6afbc;
+}
+.upper-tabs button.muted-tab.active {
+  color: #8191aa;
+  border-bottom-color: #a9b6cb;
+}
+.recording-chat {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fbfcff;
+  overflow: hidden;
+}
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 20px;
+  overscroll-behavior: contain;
+}
+.chat-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  color: #7790b4;
+}
+.chat-empty > svg {
+  flex-shrink: 0;
+}
+.chat-empty strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: #506783;
+}
+.chat-empty p {
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 5px 0 0;
+}
+.chat-empty .primary-small {
+  white-space: nowrap;
+  margin-left: auto;
+}
+.chat-turn + .chat-turn {
+  margin-top: 18px;
+}
+.chat-question {
+  margin-left: 15%;
+  border-radius: 10px 10px 2px 10px;
+  background: #eaf1ff;
+  padding: 9px 12px;
+  color: #254575;
+}
+.chat-question > span {
+  font-size: 10px;
+  color: #6c84a9;
+}
+.chat-question p {
+  margin: 3px 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-answer {
+  padding: 12px 1px 0;
+}
+.chat-answer-label {
+  color: #477ac0;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chat-answer-label > span {
+  margin-left: auto;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  color: #8494aa;
+}
+.chat-answer .markdown {
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+}
+.chat-answer .markdown h1,
+.chat-answer .markdown h2,
+.chat-answer .markdown h3 {
+  font-size: 14px;
+  margin: 10px 0 6px;
+}
+.chat-answer .markdown p {
+  margin: 7px 0;
+}
+.chat-answer > p {
+  color: #8895a8;
+  font-size: 12px;
+}
+.chat-citations {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 7px;
+  color: #92a0b1;
+  font-size: 10px;
+}
+.chat-citations button {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  color: #4776b8;
+  background: #edf3ff;
+  border: 1px solid #e0e9f8;
+  border-radius: 5px;
+  padding: 3px 6px;
+}
+.chat-citations button:hover {
+  background: #dce9ff;
+}
+.chat-stale {
+  display: block;
+  color: #ab854b;
+  margin-top: 7px;
+  font-size: 11px;
+}
+.chat-failure {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: #ad774d;
+  font-size: 12px;
+  margin-top: 7px;
+}
+.chat-failure button {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  white-space: nowrap;
+  color: #4776b8;
+}
+.chat-notice {
+  padding: 6px 20px;
+  background: #f3f6fc;
+  font-size: 11px;
+  color: #8191a7;
+}
+.chat-notice button {
+  color: #2867c7;
+  margin-left: 10px;
+}
+.chat-composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin: 5px 16px 0;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid #dce5f4;
+  border-radius: 9px;
+  background: #fff;
+}
+.chat-composer:focus-within {
+  border-color: #8db5f1;
+  box-shadow: 0 0 0 2px #e9f1ff;
+}
+.chat-composer textarea {
+  flex: 1;
+  width: 0;
+  min-height: 25px;
+  max-height: 90px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #35445d;
+  padding: 1px 0;
+}
+.chat-composer textarea:disabled {
+  background: transparent;
+}
+.chat-send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 29px;
+  height: 29px;
+  border-radius: 7px;
+  color: #fff;
+  background: #276ee4;
+  flex-shrink: 0;
+}
+.chat-send:disabled {
+  opacity: 0.38;
+}
+.chat-footnote {
+  padding: 5px 20px 7px;
+  font-size: 10px;
+  color: #99a6b7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .attachment-list {
   margin-top: 12px;
   display: flex;

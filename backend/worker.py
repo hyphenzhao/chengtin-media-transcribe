@@ -29,7 +29,7 @@ def lane(kinds):
         kind=job["data"]["kind"]
         try:
             {"prepare":media.prepare,"transcribe":media.transcribe,"diarize":media.speaker_job,"revise":ai.revise,
-             "extract":ai.extract,"diagram":ai.diagram,"title":ai.metadata,"synopsis":ai.metadata}[kind](job)
+             "extract":ai.extract,"diagram":ai.diagram,"title":ai.metadata,"synopsis":ai.metadata,"chat":ai.chat}[kind](job)
             media.check_cancel(job["id"])
             db.patch(job["id"],{"state":"complete","stage":"处理完成","progress":1,"finished_at":time.time()})
         except media.Cancelled:
@@ -58,7 +58,7 @@ def main():
     signal.signal(signal.SIGTERM,shutdown)
     signal.signal(signal.SIGINT,shutdown)
     workers=[threading.Thread(target=lane,args=(k,),daemon=True) for k in
-        [{"transcribe"},{"prepare"},{"diarize"},{"diarize"},{"revise","extract","diagram","title","synopsis"}]]
+        [{"transcribe"},{"prepare"},{"diarize"},{"diarize"},{"revise","extract","diagram","title","synopsis"},{"chat"}]]
     for t in workers:t.start()
     try:
         while not stop.wait(5): db.patch("worker-heartbeat",{"time":time.time()})
