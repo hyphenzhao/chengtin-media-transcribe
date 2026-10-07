@@ -45,6 +45,7 @@ import {
 import { api, type Rec, type Snapshot, size, stamp, uploadFile } from "./api";
 import Notes from "./Notes";
 import { UploadFlow, mediaAccept, type UploadState } from "./uploadFlow";
+import { generateForProject, ProjectAiSetupError } from "./projectAi";
 import RecordingChat from "./RecordingChat";
 import Transcript from "./Transcript";
 import Diagram from "./Diagram";
@@ -109,6 +110,8 @@ export default function App() {
     pickerTarget = useRef<{ id?: string; expected?: string }>({}),
     started = useRef(""),
     startLock = useRef(false),
+    pendingGenerations = useRef(new Set<string>()),
+    projectProvider = useRef<HTMLSelectElement>(null),
     drawerBox = useRef<HTMLElement>(null),
     menuButton = useRef<HTMLButtonElement>(null);
   const upload =
@@ -332,16 +335,37 @@ export default function App() {
     instruction = "",
     diagram_type = "auto",
   ) {
+    const projectId = pid;
+    const key = projectId + ":" + kind;
+    if (pendingGenerations.current.has(key)) return;
+    pendingGenerations.current.add(key);
     try {
-      await api(`/projects/${pid}/generate`, "POST", {
-        kind,
-        template,
-        instruction,
-        diagram_type,
-      });
+      await generateForProject(
+        projectId,
+        {
+          kind,
+          template,
+          instruction,
+          diagram_type,
+        },
+        setProviders,
+      );
       void refresh();
     } catch (e) {
       error((e as Error).message);
+      if (e instanceof ProjectAiSetupError && pidRef.current === projectId) {
+        if (e.destination === "configure") setSettingsOpen(true);
+        else {
+          if (mobile) openFeature("settings");
+          else setMiddleTab("source");
+          requestAnimationFrame(() => {
+            projectProvider.current?.scrollIntoView({ block: "center" });
+            projectProvider.current?.focus({ preventScroll: true });
+          });
+        }
+      }
+    } finally {
+      pendingGenerations.current.delete(key);
     }
   }
   function seek(time: number) {
@@ -1138,6 +1162,7 @@ export default function App() {
                 </button>
               </div>
               <select
+                ref={projectProvider}
                 aria-label="项目 AI 接口"
                 className="provider-select"
                 disabled={!snap || !!transcriptionRunning}
@@ -1145,7 +1170,9 @@ export default function App() {
                 onChange={(e) => void setting("provider_id", e.target.value)}
               >
                 <option value="">
-                  {providers.length ? "选择 AI 接口" : "尚未配置 AI 接口"}
+                  {providers.length
+                    ? "选择已保存的 AI 接口"
+                    : "尚未配置 AI 接口"}
                 </option>
                 {providers.map((p) => (
                   <option key={p.id} value={p.id}>

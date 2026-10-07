@@ -143,6 +143,10 @@ export PATH=/home/haifeng/.nvm/versions/node/v26.3.0/bin:$PATH
 - 静态资源备份于 `logs/frontend-backups/20261007-232723`，发布时保留旧哈希资源并原子替换入口页。API、识别工作进程未重启；没有新增 API 或数据库迁移。明细见 `logs/mobile-live-checks.json`、`logs/mobile-deployment.json`。
 - 实际手机 VPN、文件选择器、软键盘验收已请用户补测；浏览器尺寸检查不等同于实际手机验收。网络中断用自动化测试覆盖，未执行真实手机断网/大文件中断实验。两份短素材验收项目移入可恢复回收站。
 
+### 2026-10-08 标题生成接口选择修复
+
+标题、梗概等生成请求先读取最新项目和已保存接口。当前项目未选择接口且只有一个已保存接口时，自动绑定后再提交生成任务；保留项目的 AI 修订开关。存在多个接口时引导选择已有配置，只有完全没有配置时才打开新增接口弹层；已删除的显式选择不自动替换。补充 6 项针对性前端测试，前端共 12 项通过，生产构建通过。
+
 ## 上游
 
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) · [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) · [RapidOCR](https://github.com/RapidAI/RapidOCR) · [sherpa-onnx 说话人文档](https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/index.html) · [Mermaid](https://mermaid.js.org/config/usage.html)
