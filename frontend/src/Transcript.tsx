@@ -1,6 +1,6 @@
 import { useAutosave } from "./useAutosave";
 import { confirmAction, promptText } from "./Dialogs";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   Check,
   ChevronDown,
@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, type Rec, type Snapshot, stamp } from "./api";
+import { api, type Rec, type Snapshot, stamp, downloadFile } from "./api";
 
 function Block({
   b,
@@ -44,6 +44,7 @@ function Block({
   );
   const [editing, setEditing] = useState(editor.recovered),
     [audit, setAudit] = useState(false),
+    [toolsOpen, setToolsOpen] = useState(false),
     [history, setHistory] = useState<Rec[]>([]),
     [rawSegments, setRawSegments] = useState<Rec[]>([]);
   const run = async (fn: () => Promise<any>) => {
@@ -90,7 +91,9 @@ function Block({
                 ? "AI 已修订"
                 : "本地转写";
   return (
-    <article className={`transcript-block ${d.state}`}>
+    <article
+      className={`transcript-block ${d.state} ${toolsOpen ? "block-tools-open" : ""}`}
+    >
       <div className="block-meta">
         <button className="timecode" onClick={() => seek(d.start)}>
           <Clock3 size={11} />
@@ -98,6 +101,10 @@ function Block({
         </button>
         <span className="speaker-icon">
           <UserRound size={12} />
+        </span>
+        <span className="mobile-only speaker-name">
+          {snap.speakers.find((s) => s.id === d.speaker_id)?.data.name ||
+            "说话人待确认"}
         </span>
         <select
           className="speaker-select"
@@ -219,6 +226,14 @@ function Block({
           </button>
         </details>
       )}
+      <button
+        className="mobile-only block-tools-toggle"
+        aria-expanded={toolsOpen}
+        onClick={() => setToolsOpen(!toolsOpen)}
+      >
+        <ChevronDown size={15} />
+        说话人、编辑与核对
+      </button>
       {d.state !== "accumulating" && (
         <div className="block-actions">
           <button onClick={() => void toggleAudit()}>
@@ -348,6 +363,11 @@ export default function Transcript({
   tab,
   setTab,
   onGenerate,
+  mobile = false,
+  moreOpen = false,
+  mobileSection = "",
+  scrollRoot,
+  onConfigure,
 }: {
   snap: Snapshot;
   seek: (n: number) => void;
@@ -356,6 +376,11 @@ export default function Transcript({
   tab: string;
   setTab: (s: string) => void;
   onGenerate: (kind: string, template?: string, instruction?: string) => void;
+  mobile?: boolean;
+  moreOpen?: boolean;
+  mobileSection?: string;
+  scrollRoot?: RefObject<HTMLDivElement | null>;
+  onConfigure: () => void;
 }) {
   const [template, setTemplate] = useState("会议纪要"),
     [instruction, setInstruction] = useState(""),
@@ -363,9 +388,27 @@ export default function Transcript({
     [edit, setEdit] = useState(false),
     [draft, setDraft] = useState(""),
     [editVersion, setEditVersion] = useState(0),
-    [selected, setSelected] = useState("");
+    [selected, setSelected] = useState(""),
+    [speakersOpen, setSpeakersOpen] = useState(false);
   const area = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const extractArea = useRef<HTMLDivElement>(null);
+  const firstScroll = useRef(true);
+  const bodyVisible = useRef(false);
+  useEffect(() => {
+    if (!mobile || !scrollRoot?.current) return;
+    const root = scrollRoot.current;
+    const changed = () => {
+      follow.current =
+        root.scrollHeight - root.scrollTop - root.clientHeight < 140;
+      const rect = area.current?.getBoundingClientRect();
+      bodyVisible.current =
+        !!rect && rect.top < root.clientHeight && rect.bottom > 60;
+    };
+    root.addEventListener("scroll", changed, { passive: true });
+    changed();
+    return () => root.removeEventListener("scroll", changed);
+  }, [mobile, scrollRoot]);
   const extracts = snap.artifacts.filter((a) => a.data.kind === "extract");
   const current =
     extracts.find((a) => a.id === selected) || extracts[extracts.length - 1];
@@ -387,15 +430,27 @@ export default function Transcript({
     0,
   );
   useEffect(() => {
-    if (follow.current && !edit)
-      area.current?.scrollTo({
-        top: area.current.scrollHeight,
-        behavior: "auto",
-      });
+    if (firstScroll.current) {
+      firstScroll.current = false;
+      return;
+    }
+    if (
+      !follow.current ||
+      edit ||
+      document.activeElement?.matches("input,textarea,[contenteditable=true]")
+    )
+      return;
+    if (mobile) {
+      if (!moreOpen && bodyVisible.current)
+        scrollRoot?.current?.scrollTo({ top: scrollRoot.current.scrollHeight });
+    } else {
+      const el = tab === "text" ? area.current : extractArea.current;
+      if (el && el.getClientRects().length)
+        el.scrollTo({ top: el.scrollHeight });
+    }
   }, [
     snap.blocks.map((b) => `${b.id}:${b.version}`).join(","),
     current?.version,
-    edit,
   ]);
   async function rename(s: Rec) {
     const name = await promptText("说话人名称", s.data.name);
@@ -425,318 +480,367 @@ export default function Transcript({
   }
   return (
     <>
-      <div className="transcript-tabs">
-        <div className="tabs">
-          <button
-            className={`${tab === "text" ? "active" : ""} ${!snap.blocks.length ? "muted-tab" : ""}`}
-            onClick={() => setTab("text")}
-          >
-            <FileText size={15} />
-            转录正文
-            {snap.blocks.length > 0 && (
-              <span className="count">{snap.blocks.length}</span>
-            )}
-          </button>
-          <button
-            className={`${tab === "extract" ? "active" : ""} ${!extracts.length ? "muted-tab" : ""}`}
-            onClick={() => setTab("extract")}
-          >
-            <Sparkles size={15} />
-            内容提取
-          </button>
-        </div>
-        <select
-          className="export-select"
-          aria-label="导出文本"
-          value=""
-          onChange={(e) => {
-            if (e.target.value)
-              window.open(
-                `/api/projects/${snap.project.id}/export?format=${e.target.value}${tab === "extract" && current ? "&artifact_id=" + current.id : ""}`,
-              );
-          }}
-        >
-          <option value="">↓ 导出</option>
-          <option value="md">Markdown</option>
-          <option value="txt">纯文本 TXT</option>
-          {tab === "text" && <option value="srt">字幕 SRT</option>}
-        </select>
-      </div>
-      {tab === "text" ? (
-        <>
-          <div className="transcript-subhead">
-            <span>
-              {charCount.toLocaleString()} 字 · {snap.blocks.length} 段
-            </span>
-            <div className="speakers-list">
-              {snap.speakers.map((s) => (
-                <button
-                  key={s.id}
-                  title="点击改名"
-                  onClick={() => void rename(s)}
-                >
-                  {s.data.name}
-                  <Pencil size={10} />
-                </button>
-              ))}
-            </div>
-          </div>
-          <div
-            className="transcript-scroll"
-            ref={area}
-            onScroll={() => {
-              const el = area.current;
-              follow.current =
-                !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-            }}
-          >
-            {snap.blocks.length ? (
-              snap.blocks.map((b) => (
-                <Block
-                  key={b.id}
-                  b={b}
-                  snap={snap}
-                  seek={seek}
-                  refresh={refresh}
-                  error={error}
-                />
-              ))
-            ) : (
-              <div className="transcript-empty">
-                <div className="paper-illustration">
-                  <div />
-                  <div />
-                  <div />
-                  <span>
-                    <Sparkles size={16} />
-                  </span>
-                </div>
-                <h3>每一句，都值得被记录</h3>
-                <p>
-                  上传音视频，点击「开始转录」。
-                  <br />
-                  识别出的内容将在这里逐段呈现。
-                </p>
-                <div className="state-legend">
-                  <span>
-                    <i className="gray-dot" />
-                    本地转写
-                  </span>
-                  <ChevronRight size={12} />
-                  <span>
-                    <i className="orange-dot" />
-                    AI 修订
-                  </span>
-                  <ChevronRight size={12} />
-                  <span>
-                    <i className="blue-dot" />
-                    可编辑正文
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
-          <div className="transcript-footer">
-            <span>
-              <span className="status-dot" />
-              正文与原始识别结果均保存在本地
-            </span>
+      <section className="transcript-view" hidden={!mobile && tab !== "text"}>
+        <div className="transcript-tabs">
+          <div className="tabs">
             <button
-              onClick={() => {
-                follow.current = true;
-                area.current?.scrollTo({
-                  top: area.current.scrollHeight,
-                  behavior: "smooth",
-                });
-              }}
+              className={`${tab === "text" ? "active" : ""} ${!snap.blocks.length ? "muted-tab" : ""}`}
+              onClick={() => setTab("text")}
             >
-              回到最新 ↓
+              <FileText size={15} />
+              转录正文
+              {snap.blocks.length > 0 && (
+                <span className="count">{snap.blocks.length}</span>
+              )}
+            </button>
+            <button
+              className={`${tab === "extract" ? "active" : ""} ${!extracts.length ? "muted-tab" : ""}`}
+              onClick={() => setTab("extract")}
+            >
+              <Sparkles size={15} />
+              内容提取
             </button>
           </div>
-        </>
-      ) : (
-        <>
-          <div className="extract-controls">
-            <div className="extract-first-row">
-              <select
-                aria-label="提取模板"
-                value={template}
-                onChange={(e) => setTemplate(e.target.value)}
-              >
-                {[
-                  "会议纪要",
-                  "内容摘要",
-                  "面试记录",
-                  "行动清单",
-                  "自定义要求",
-                ].map((t) => (
-                  <option key={t}>{t}</option>
-                ))}
-              </select>
-              <button
-                className="button primary"
-                disabled={busy || incomplete || !snap.blocks.length}
-                onClick={() => {
-                  setSelected("");
-                  setEdit(false);
-                  onGenerate("extract", template, instruction);
-                }}
-              >
-                {busy ? (
-                  <LoaderCircle className="spin" size={14} />
-                ) : (
-                  <Sparkles size={14} />
-                )}
-                生成内容提取
-              </button>
-            </div>
-            <textarea
-              rows={2}
-              placeholder="补充整理要求（可选），例如：重点保留结论与下一步行动"
-              value={instruction}
-              onChange={(e) => setInstruction(e.target.value)}
-            />
-            {(busy || incomplete) && (
-              <small>
-                等待转写、说话人分析、修订或当前生成任务完成后，可开始新的提取。
-              </small>
-            )}
-          </div>
-          {current && (
-            <div className="extract-toolbar">
-              <select
-                aria-label="结果版本"
-                value={current.id}
-                onChange={(e) => {
-                  setSelected(e.target.value);
-                  setEdit(false);
-                }}
-              >
-                {extracts.map((a, i) => (
-                  <option key={a.id} value={a.id}>
-                    结果 {i + 1} ·{" "}
-                    {new Date(a.created_at * 1000).toLocaleTimeString("zh-CN", {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                    {a.data.state === "generating" ? " · 生成中" : ""}
-                  </option>
-                ))}
-              </select>
-              <span className="grow" />
-              <button onClick={() => setSource(!source)}>
-                {source ? "预览" : "Markdown"}
-              </button>
-              {current.data.state === "complete" && !edit && (
-                <button
-                  onClick={() => {
-                    setDraft(current.data.text);
-                    setEditVersion(current.version);
-                    setEdit(true);
-                  }}
-                >
-                  <Pencil size={12} />
-                  编辑
-                </button>
-              )}
-            </div>
-          )}
-          {current &&
-            current.data.source_revision !==
-              snap.project.data.transcript_revision && (
-              <div className="notice">
-                源文已更新，可重新生成；当前结果仍然保留。
-              </div>
-            )}
-          <div
-            className="extract-scroll"
-            ref={area}
-            onScroll={() => {
-              const el = area.current;
-              follow.current =
-                !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+          <select
+            className="export-select"
+            aria-label="导出文本"
+            value=""
+            onChange={(e) => {
+              if (e.target.value)
+                downloadFile(
+                  `/api/projects/${snap.project.id}/export?format=${e.target.value}${!mobile && tab === "extract" && current ? "&artifact_id=" + current.id : ""}`,
+                );
             }}
           >
-            {current ? (
-              edit ? (
-                <>
-                  <textarea
-                    className="markdown-edit"
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                  />
-                  <div className="inline-actions">
-                    <button onClick={() => setEdit(false)}>取消</button>
-                    <button
-                      className="primary-small"
-                      onClick={async () => {
-                        if (current.version !== editVersion) {
-                          if (
-                            await confirmAction(
-                              "结果已在另一页面更新。服务器内容：\n" +
-                                current.data.text +
-                                "\n\n保留你的草稿并基于最新版本继续编辑？",
-                            )
-                          )
-                            setEditVersion(current.version);
-                        } else void save();
-                      }}
-                    >
-                      {current.version !== editVersion
-                        ? "核对最新版本"
-                        : "保存修改"}
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  {source ? (
-                    <pre className="markdown-source">{current.data.text}</pre>
-                  ) : (
-                    <div className="markdown">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        skipHtml
-                        components={{
-                          img: ({ alt }) => (
-                            <span>[图片：{alt || "未载入"}]</span>
-                          ),
-                        }}
-                      >
-                        {current.data.text}
-                      </ReactMarkdown>
-                    </div>
-                  )}
-                  {current.data.state === "generating" && (
-                    <div className="generating">
-                      <LoaderCircle size={14} className="spin" />
-                      正在生成，内容会持续更新
-                    </div>
-                  )}
-                  {current.data.state === "failed" && (
-                    <div className="notice">
-                      生成中断，已保留输出，可在任务区重试。
-                    </div>
-                  )}
-                  {current.data.notice && (
-                    <div className="notice">{current.data.notice}</div>
-                  )}
-                </>
-              )
-            ) : (
-              <div className="empty-small">
-                <Sparkles size={30} />
-                <h3>从原话，提炼出重点</h3>
-                <p>
-                  选择整理方式，生成摘要、纪要或行动清单。
-                  <br />
-                  文字完成后将自动生成内容图谱。
-                </p>
+            <option value="">↓ 导出</option>
+            <option value="md">Markdown</option>
+            <option value="txt">纯文本 TXT</option>
+            {(mobile || tab === "text") && (
+              <option value="srt">字幕 SRT</option>
+            )}
+          </select>
+        </div>
+
+        <div
+          className={`transcript-subhead ${speakersOpen ? "speakers-open" : ""}`}
+        >
+          <span>
+            {charCount.toLocaleString()} 字 · {snap.blocks.length} 段
+          </span>
+          <button
+            className="mobile-only"
+            aria-expanded={speakersOpen}
+            onClick={() => setSpeakersOpen(!speakersOpen)}
+          >
+            说话人管理
+            <ChevronDown size={15} />
+          </button>
+          <div className="speakers-list">
+            {snap.speakers.map((s) => (
+              <button
+                key={s.id}
+                title="点击改名"
+                onClick={() => void rename(s)}
+              >
+                {s.data.name}
+                <Pencil size={10} />
+              </button>
+            ))}
+          </div>
+        </div>
+        <div
+          className="transcript-scroll"
+          ref={area}
+          onScroll={() => {
+            const el = area.current;
+            follow.current =
+              !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+          }}
+        >
+          {snap.blocks.length ? (
+            snap.blocks.map((b) => (
+              <Block
+                key={b.id}
+                b={b}
+                snap={snap}
+                seek={seek}
+                refresh={refresh}
+                error={error}
+              />
+            ))
+          ) : (
+            <div className="transcript-empty">
+              <div className="paper-illustration">
+                <div />
+                <div />
+                <div />
+                <span>
+                  <Sparkles size={16} />
+                </span>
               </div>
+              <h3>每一句，都值得被记录</h3>
+              <p>
+                上传音视频，点击「开始转录」。
+                <br />
+                识别出的内容将在这里逐段呈现。
+              </p>
+              <div className="state-legend">
+                <span>
+                  <i className="gray-dot" />
+                  本地转写
+                </span>
+                <ChevronRight size={12} />
+                <span>
+                  <i className="orange-dot" />
+                  AI 修订
+                </span>
+                <ChevronRight size={12} />
+                <span>
+                  <i className="blue-dot" />
+                  可编辑正文
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="transcript-footer">
+          <span>
+            <span className="status-dot" />
+            正文与原始识别结果均保存在本地
+          </span>
+          <button
+            hidden={!snap.blocks.length}
+            onClick={() => {
+              follow.current = true;
+              const el = mobile ? scrollRoot?.current : area.current;
+              bodyVisible.current = true;
+              el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+            }}
+          >
+            回到最新 ↓
+          </button>
+        </div>
+      </section>
+      <section
+        className="extract-view"
+        hidden={
+          mobile ? !moreOpen || mobileSection !== "extract" : tab !== "extract"
+        }
+      >
+        <div className="transcript-tabs">
+          <div className="tabs">
+            <button onClick={() => setTab("text")} className="desktop-only">
+              转录正文
+            </button>
+            <button className="active">内容提取</button>
+          </div>
+          <select
+            aria-label="导出提取结果"
+            value=""
+            onChange={(e) => {
+              if (e.target.value && current)
+                downloadFile(
+                  `/api/projects/${snap.project.id}/export?format=${e.target.value}&artifact_id=${current.id}`,
+                );
+            }}
+            disabled={!current}
+          >
+            <option value="">↓ 导出</option>
+            <option value="md">Markdown</option>
+            <option value="txt">纯文本 TXT</option>
+          </select>
+        </div>
+        <div className="extract-controls">
+          <div className="extract-first-row">
+            <select
+              aria-label="提取模板"
+              value={template}
+              onChange={(e) => setTemplate(e.target.value)}
+            >
+              {[
+                "会议纪要",
+                "内容摘要",
+                "面试记录",
+                "行动清单",
+                "自定义要求",
+              ].map((t) => (
+                <option key={t}>{t}</option>
+              ))}
+            </select>
+            <button
+              className="button primary"
+              disabled={
+                busy ||
+                incomplete ||
+                !snap.blocks.length ||
+                !snap.project.data.settings.provider_id
+              }
+              onClick={() => {
+                setSelected("");
+                setEdit(false);
+                onGenerate("extract", template, instruction);
+              }}
+            >
+              {busy ? (
+                <LoaderCircle className="spin" size={14} />
+              ) : (
+                <Sparkles size={14} />
+              )}
+              生成内容提取
+            </button>
+          </div>
+          <textarea
+            rows={2}
+            placeholder="补充整理要求（可选），例如：重点保留结论与下一步行动"
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+          />
+          {!snap.project.data.settings.provider_id && (
+            <small>
+              先选择项目的 AI 接口，正文仍可本地转写、编辑和导出。{" "}
+              <button onClick={onConfigure}>选择 AI 接口</button>
+            </small>
+          )}
+          {(busy || incomplete) && (
+            <small>
+              等待转写、说话人分析、修订或当前生成任务完成后，可开始新的提取。
+            </small>
+          )}
+        </div>
+        {current && (
+          <div className="extract-toolbar">
+            <select
+              aria-label="结果版本"
+              value={current.id}
+              onChange={(e) => {
+                setSelected(e.target.value);
+                setEdit(false);
+              }}
+            >
+              {extracts.map((a, i) => (
+                <option key={a.id} value={a.id}>
+                  结果 {i + 1} ·{" "}
+                  {new Date(a.created_at * 1000).toLocaleTimeString("zh-CN", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                  {a.data.state === "generating" ? " · 生成中" : ""}
+                </option>
+              ))}
+            </select>
+            <span className="grow" />
+            <button onClick={() => setSource(!source)}>
+              {source ? "预览" : "Markdown"}
+            </button>
+            {current.data.state === "complete" && !edit && (
+              <button
+                onClick={() => {
+                  setDraft(current.data.text);
+                  setEditVersion(current.version);
+                  setEdit(true);
+                }}
+              >
+                <Pencil size={12} />
+                编辑
+              </button>
             )}
           </div>
-        </>
-      )}
+        )}
+        {current &&
+          current.data.source_revision !==
+            snap.project.data.transcript_revision && (
+            <div className="notice">
+              源文已更新，可重新生成；当前结果仍然保留。
+            </div>
+          )}
+        <div
+          className="extract-scroll"
+          ref={extractArea}
+          onScroll={() => {
+            const el = extractArea.current;
+            follow.current =
+              !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+          }}
+        >
+          {current ? (
+            edit ? (
+              <>
+                <textarea
+                  className="markdown-edit"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                />
+                <div className="inline-actions">
+                  <button onClick={() => setEdit(false)}>取消</button>
+                  <button
+                    className="primary-small"
+                    onClick={async () => {
+                      if (current.version !== editVersion) {
+                        if (
+                          await confirmAction(
+                            "结果已在另一页面更新。服务器内容：\n" +
+                              current.data.text +
+                              "\n\n保留你的草稿并基于最新版本继续编辑？",
+                          )
+                        )
+                          setEditVersion(current.version);
+                      } else void save();
+                    }}
+                  >
+                    {current.version !== editVersion
+                      ? "核对最新版本"
+                      : "保存修改"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                {source ? (
+                  <pre className="markdown-source">{current.data.text}</pre>
+                ) : (
+                  <div className="markdown">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      skipHtml
+                      components={{
+                        img: ({ alt }) => (
+                          <span>[图片：{alt || "未载入"}]</span>
+                        ),
+                      }}
+                    >
+                      {current.data.text}
+                    </ReactMarkdown>
+                  </div>
+                )}
+                {current.data.state === "generating" && (
+                  <div className="generating">
+                    <LoaderCircle size={14} className="spin" />
+                    正在生成，内容会持续更新
+                  </div>
+                )}
+                {current.data.state === "failed" && (
+                  <div className="notice">
+                    生成中断，已保留输出，可在任务区重试。
+                  </div>
+                )}
+                {current.data.notice && (
+                  <div className="notice">{current.data.notice}</div>
+                )}
+              </>
+            )
+          ) : (
+            <div className="empty-small">
+              <Sparkles size={30} />
+              <h3>从原话，提炼出重点</h3>
+              <p>
+                选择整理方式，生成摘要、纪要或行动清单。
+                <br />
+                文字完成后将自动生成内容图谱。
+              </p>
+            </div>
+          )}
+        </div>
+      </section>
     </>
   );
 }

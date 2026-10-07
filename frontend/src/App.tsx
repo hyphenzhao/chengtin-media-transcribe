@@ -25,6 +25,8 @@ import {
   MessageCircle,
   Minimize2,
   MoreHorizontal,
+  Menu,
+  Pause,
   NotebookPen,
   PanelBottomClose,
   Pencil,
@@ -42,6 +44,7 @@ import {
 } from "lucide-react";
 import { api, type Rec, type Snapshot, size, stamp, uploadFile } from "./api";
 import Notes from "./Notes";
+import { UploadFlow, mediaAccept, type UploadState } from "./uploadFlow";
 import RecordingChat from "./RecordingChat";
 import Transcript from "./Transcript";
 import Diagram from "./Diagram";
@@ -65,7 +68,27 @@ export default function App() {
     [titleDraft, setTitleDraft] = useState(""),
     [synopsis, setSynopsis] = useState(""),
     [advanced, setAdvanced] = useState(false),
-    [upload, setUpload] = useState<number | null>(null),
+    [uploadState, setUploadState] = useState<UploadState | null>(() => {
+      try {
+        const saved = JSON.parse(
+          localStorage.getItem("chengtin-upload") || "null",
+        );
+        return saved?.projectId
+          ? { ...saved, phase: "failed", error: "重新选择同一文件即可继续上传" }
+          : null;
+      } catch {
+        return null;
+      }
+    }),
+    [mobile, setMobile] = useState(
+      () => window.matchMedia("(width < 1100px)").matches,
+    ),
+    [drawer, setDrawer] = useState(false),
+    [moreOpen, setMoreOpen] = useState(false),
+    [mobileSection, setMobileSection] = useState(""),
+    [playerFold, setPlayerFold] = useState(false),
+    [playing, setPlaying] = useState(false),
+    [starting, setStarting] = useState(false),
     [dragging, setDragging] = useState(false),
     [rightMax, setRightMax] = useState(""),
     [split, setSplit] = useState(
@@ -82,7 +105,78 @@ export default function App() {
     pidRef = useRef(pid),
     refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
     synopsisDirty = useRef(false),
-    scrollY = useRef(0);
+    scrollY = useRef(0),
+    pickerTarget = useRef<{ id?: string; expected?: string }>({}),
+    started = useRef(""),
+    startLock = useRef(false),
+    drawerBox = useRef<HTMLElement>(null),
+    menuButton = useRef<HTMLButtonElement>(null);
+  const upload =
+    uploadState?.projectId === pid &&
+    ["creating", "uploading"].includes(uploadState.phase)
+      ? uploadState.progress
+      : null;
+  const uploadBusy =
+    !!uploadState && ["creating", "uploading"].includes(uploadState.phase);
+  useEffect(() => {
+    const query = window.matchMedia("(width < 1100px)");
+    const update = () => {
+      setMobile(query.matches);
+      setDrawer(false);
+    };
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (mobile && drawer)
+      drawerBox.current?.querySelector<HTMLElement>("button,input")?.focus();
+  }, [mobile, drawer]);
+  function closeDrawer() {
+    setDrawer(false);
+    menuButton.current?.focus();
+  }
+  function openFeature(section: string) {
+    setMoreOpen(true);
+    setMobileSection(section);
+    requestAnimationFrame(() =>
+      document
+        .getElementById("mobile-feature-" + section)
+        ?.scrollIntoView({ block: "start" }),
+    );
+  }
+  function chooseFile(id?: string, expected?: string) {
+    if (uploadBusy || uploadFlow.current.busy) return;
+    pickerTarget.current = { id, expected };
+    file.current?.click();
+  }
+  function selectProject(id: string) {
+    pidRef.current = id;
+    setPid(id);
+    setDrawer(false);
+    setTitleEditing(false);
+    setMoreOpen(false);
+    setMiddleTab("source");
+    setTextTab("text");
+  }
+  const uploadFlow = useRef(
+    new UploadFlow({
+      create: async () => {
+        const project = await api<Rec>("/projects", "POST");
+        selectProject(project.id);
+        setTrash(false);
+        void loadProjects();
+        return project.id;
+      },
+      transfer: (id, f, progress) => uploadFile(id, f, "primary", progress),
+      changed: (state) => {
+        setUploadState(state);
+        if (state.phase === "complete")
+          localStorage.removeItem("chengtin-upload");
+        else if (state.projectId)
+          localStorage.setItem("chengtin-upload", JSON.stringify(state));
+      },
+    }),
+  );
   snapRef.current = snap;
   pidRef.current = pid;
   const error = useCallback((message: string) => setToast(message), []);
@@ -145,6 +239,20 @@ export default function App() {
     return () => source.close();
   }, [scheduleRefresh]);
   useEffect(() => {
+    const resume = () => {
+      if (!document.hidden) {
+        scheduleRefresh();
+        void loadProviders();
+      }
+    };
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("online", resume);
+    return () => {
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("online", resume);
+    };
+  }, [scheduleRefresh, loadProviders]);
+  useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(""), 9000);
     return () => clearTimeout(t);
@@ -198,16 +306,13 @@ export default function App() {
       error((e as Error).message);
     }
   }
-  async function attach(f: File) {
-    if (!pid) return;
+  async function attach(f: File, target = pickerTarget.current) {
     try {
-      setUpload(0);
-      await uploadFile(pid, f, "primary", setUpload);
+      await uploadFlow.current.start(f, target.id, target.expected);
       await refresh();
+      void loadProjects();
     } catch (e) {
       error((e as Error).message);
-    } finally {
-      setUpload(null);
     }
   }
   async function action(path: string, method = "POST") {
@@ -215,8 +320,10 @@ export default function App() {
       await api(path, method);
       await refresh();
       await loadProjects();
+      return true;
     } catch (e) {
       error((e as Error).message);
+      return false;
     }
   }
   async function generate(
@@ -239,12 +346,24 @@ export default function App() {
   }
   function seek(time: number) {
     setMiddleTab("source");
-    setTimeout(() => {
-      if (player.current) {
-        player.current.currentTime = time;
-        void player.current.play().catch(() => {});
-      }
-    }, 100);
+    setPlayerFold(false);
+    if (mobile) setMoreOpen(false);
+    requestAnimationFrame(() => {
+      const media = player.current;
+      if (!media) return;
+      const play = () => {
+        media.currentTime = time;
+        void media
+          .play()
+          .catch(() => error("已定位时间码，请点击播放器开始回听。"));
+      };
+      if (media.readyState) play();
+      else media.addEventListener("loadedmetadata", play, { once: true });
+      if (mobile)
+        document
+          .getElementById("source-media")
+          ?.scrollIntoView({ block: "start" });
+    });
   }
   function resize(e: ReactPointerEvent, axis: "left" | "middle" | "vertical") {
     e.preventDefault();
@@ -284,6 +403,7 @@ export default function App() {
   const primary = snap?.assets.find(
     (a) => a.id === snap.project.data.primary_id,
   );
+  useEffect(() => setPlaying(false), [primary?.id]);
   const activeJobs =
     snap?.jobs.filter((j) =>
       ["queued", "running", "failed", "cancelled"].includes(j.data.state),
@@ -302,15 +422,142 @@ export default function App() {
         ["queued", "running"].includes(j.data.state),
     ) || false;
   const settings = snap?.project.data.settings || {};
+  useEffect(() => {
+    const key = pid + ":" + transcribeJob?.id;
+    if (transcribeJob && started.current !== key) {
+      started.current = key;
+      setPlayerFold(true);
+    }
+    if (!transcribeJob) setPlayerFold(false);
+  }, [pid, transcribeJob?.id]);
+  async function startTranscription() {
+    if (startLock.current || !primary || primary.data.state !== "ready") return;
+    startLock.current = true;
+    setStarting(true);
+    setTextTab("text");
+    const ok = await action(
+      transcribeJob &&
+        ["failed", "cancelled"].includes(transcribeJob.data.state)
+        ? `/jobs/${transcribeJob.id}/retry`
+        : `/projects/${pid}/transcribe`,
+    );
+    startLock.current = false;
+    setStarting(false);
+    if (ok && mobile) {
+      setPlayerFold(true);
+      setMoreOpen(false);
+    }
+  }
+  function featureStatus(kind: string) {
+    if (kind === "settings")
+      return settings.ai_enabled ? "AI 已开启" : "本地转写";
+    if (kind === "metadata")
+      return snap?.project.data.synopsis ? "已填写" : "可选";
+    if (kind === "notes") return "本地保存";
+    const job = snap?.jobs.filter((j) => j.data.kind === kind).at(-1);
+    if (job && ["running", "queued"].includes(job.data.state)) return "处理中";
+    if (job?.data.state === "failed") return "未完成 · 可重试";
+    if (kind === "chat")
+      return snap?.artifacts.some(
+        (a) => a.data.kind === "extract" && a.data.state === "complete",
+      )
+        ? "可以提问"
+        : "提取后可用";
+    return snap?.artifacts.some(
+      (a) => a.data.kind === kind && a.data.state === "complete",
+    )
+      ? "已生成"
+      : "待生成";
+  }
   return (
     <div
-      className="workbench"
+      className={`workbench ${drawer ? "drawer-open" : ""} ${moreOpen ? "mobile-more-open" : ""} mobile-section-${mobileSection} ${playerFold ? "player-folded" : ""} right-max-${rightMax}`}
       ref={layout}
       style={{
         gridTemplateColumns: `minmax(190px,${widths[0]}%) 5px minmax(300px,${widths[1]}%) 5px minmax(360px,1fr)`,
       }}
     >
-      <aside className="sidebar">
+      <input
+        ref={file}
+        type="file"
+        hidden
+        accept={mediaAccept}
+        aria-label="选择音视频文件"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void attach(f);
+          e.target.value = "";
+        }}
+      />
+      <nav className="mobile-header" aria-label="手机导航">
+        <button
+          ref={menuButton}
+          aria-label="项目列表"
+          aria-expanded={drawer}
+          onClick={() => setDrawer(true)}
+        >
+          <Menu size={21} />
+        </button>
+        <strong>{snap?.project.data.title || "澄听 · 音视频转文字"}</strong>
+        <button disabled={uploadBusy} onClick={() => chooseFile()}>
+          <Plus size={18} />
+          新转写
+        </button>
+        <button
+          aria-label="更多功能"
+          aria-expanded={moreOpen}
+          onClick={() => {
+            setMoreOpen(!moreOpen);
+            requestAnimationFrame(() =>
+              document
+                .getElementById("mobile-more-toggle")
+                ?.scrollIntoView({ block: "start" }),
+            );
+          }}
+        >
+          <SlidersHorizontal size={20} />
+        </button>
+      </nav>
+      {mobile && drawer && (
+        <button
+          className="drawer-backdrop"
+          aria-label="关闭项目列表"
+          onClick={closeDrawer}
+        />
+      )}
+      <aside
+        className="sidebar"
+        ref={drawerBox}
+        inert={mobile && !drawer ? true : undefined}
+        role={mobile ? "dialog" : undefined}
+        aria-modal={mobile && drawer ? true : undefined}
+        aria-label={mobile ? "项目列表" : undefined}
+        onKeyDown={(e) => {
+          if (!mobile || !drawer) return;
+          if (e.key === "Escape") closeDrawer();
+          if (e.key === "Tab") {
+            const items = [
+              ...(drawerBox.current?.querySelectorAll<HTMLElement>(
+                "button:not(:disabled),input",
+              ) || []),
+            ].filter((el) => el.getClientRects().length);
+            const index = items.indexOf(document.activeElement as HTMLElement);
+            if (items.length) {
+              e.preventDefault();
+              items[
+                (index + (e.shiftKey ? -1 : 1) + items.length) % items.length
+              ].focus();
+            }
+          }
+        }}
+      >
+        <button
+          className="mobile-only drawer-close"
+          aria-label="关闭项目列表"
+          onClick={closeDrawer}
+        >
+          <X size={22} />
+        </button>
         <div className="brand">
           <span className="brand-icon">
             <AudioLines size={24} />
@@ -322,7 +569,11 @@ export default function App() {
             <small>让每一段声音，留下脉络</small>
           </div>
         </div>
-        <button className="new-project" onClick={() => void create()}>
+        <button
+          className="new-project"
+          disabled={uploadBusy}
+          onClick={() => (mobile ? chooseFile() : void create())}
+        >
           <Plus size={18} />
           新建项目<span>＋</span>
         </button>
@@ -356,9 +607,7 @@ export default function App() {
                 className={`project-item ${p.id === pid ? "active" : ""}`}
                 key={p.id}
                 onClick={() => {
-                  setPid(p.id);
-                  setTitleEditing(false);
-                  setMiddleTab("source");
+                  selectProject(p.id);
                 }}
               >
                 <span className="project-file">
@@ -387,7 +636,12 @@ export default function App() {
           )}
         </div>
         <div className="sidebar-bottom">
-          <button onClick={() => setSettingsOpen(true)}>
+          <button
+            onClick={() => {
+              setSettingsOpen(true);
+              setDrawer(false);
+            }}
+          >
             <Settings2 size={17} />
             AI 接口设置
             <span className="provider-count">
@@ -416,7 +670,7 @@ export default function App() {
         onPointerDown={(e) => resize(e, "left")}
       />
       <main className="control-column">
-        <header className="project-header">
+        <header className="project-header mobile-function-metadata">
           <div className="breadcrumb">
             <Folder size={12} />
             工作台
@@ -531,13 +785,31 @@ export default function App() {
               永久删除
             </button>
           </div>
-        ) : middleTab === "diagram" ? (
+        ) : null}
+        <div
+          className="diagram-slot mobile-function-diagram"
+          hidden={
+            !!snap?.project.data.deleted || (!mobile && middleTab !== "diagram")
+          }
+        >
           <Diagram
+            key={pid}
             item={graph}
             jobError={
               graphJob?.data.state === "failed" ? graphJob.data.error : ""
             }
             busy={diagramBusy}
+            disabledReason={
+              !settings.provider_id
+                ? "先在「转写与 AI 设置」中选择 AI 接口。"
+                : !snap?.artifacts.some(
+                      (a) =>
+                        a.data.kind === "extract" &&
+                        a.data.state === "complete",
+                    )
+                  ? "先生成内容提取，完成后会自动生成图谱。"
+                  : ""
+            }
             stale={
               !!graph &&
               (graph.data.source_revision !==
@@ -548,225 +820,257 @@ export default function App() {
             }
             onGenerate={(i, t) => void generate("diagram", "", i, t)}
           />
-        ) : (
-          <div className="control-scroll">
-            {snap &&
-              (["title", "synopsis"] as const).map((kind) =>
-                snap.project.data[kind + "_suggestion"] ? (
-                  <div className="notice" key={kind}>
-                    AI {kind === "title" ? "标题" : "梗概"}
-                    建议（已保留你的编辑）：
-                    <p>{snap.project.data[kind + "_suggestion"]}</p>
-                    <button
-                      onClick={() =>
-                        void patchProject({
-                          [kind]: snap.project.data[kind + "_suggestion"],
-                        }).catch((e) => error(e.message))
-                      }
-                    >
-                      采用建议
-                    </button>
-                  </div>
-                ) : null,
-              )}
-            <section className="synopsis-section">
-              <div className="section-label">
-                <span>内容梗概</span>
-                <button
-                  disabled={!snap}
-                  onClick={() => void generate("synopsis")}
-                >
-                  <Sparkles size={12} />
-                  AI 生成
-                </button>
-              </div>
-              <textarea
-                disabled={!snap}
-                rows={3}
-                value={snap ? synopsis : ""}
-                onChange={(e) => {
-                  setSynopsis(e.target.value);
-                  synopsisDirty.current = true;
-                }}
-                onBlur={() => void saveSynopsis()}
-                placeholder="这段内容讲了什么？写下简短说明，或让 AI 帮你整理。"
-              />
-              <small>
-                {synopsisDirty.current
-                  ? "编辑完成后自动保存"
-                  : "让重要信息，一眼可见"}
-              </small>
-            </section>
-            <section className="media-section">
-              <div className="section-label">
-                <span>原始素材</span>
-                {primary && (
-                  <span className="file-kind">
-                    {primary.data.type === "video" ? "VIDEO" : "AUDIO"}
-                  </span>
-                )}
-              </div>
-              {primary ? (
-                <>
-                  <div
-                    className={`player-frame ${primary.data.type === "audio" ? "audio-player" : ""}`}
+        </div>
+        <div
+          className="control-scroll"
+          hidden={
+            !!snap?.project.data.deleted || (!mobile && middleTab !== "source")
+          }
+        >
+          {snap &&
+            (["title", "synopsis"] as const).map((kind) =>
+              snap.project.data[kind + "_suggestion"] ? (
+                <div className="notice" key={kind}>
+                  AI {kind === "title" ? "标题" : "梗概"}
+                  建议（已保留你的编辑）：
+                  <p>{snap.project.data[kind + "_suggestion"]}</p>
+                  <button
+                    onClick={() =>
+                      void patchProject({
+                        [kind]: snap.project.data[kind + "_suggestion"],
+                      }).catch((e) => error(e.message))
+                    }
                   >
-                    {primary.data.type === "video" ? (
-                      <video
+                    采用建议
+                  </button>
+                </div>
+              ) : null,
+            )}
+          <section className="synopsis-section mobile-function-metadata">
+            <div className="section-label">
+              <span>内容梗概</span>
+              <button
+                disabled={!snap}
+                onClick={() => void generate("synopsis")}
+              >
+                <Sparkles size={12} />
+                AI 生成
+              </button>
+            </div>
+            <textarea
+              disabled={!snap}
+              rows={3}
+              value={snap ? synopsis : ""}
+              onChange={(e) => {
+                setSynopsis(e.target.value);
+                synopsisDirty.current = true;
+              }}
+              onBlur={() => void saveSynopsis()}
+              placeholder="这段内容讲了什么？写下简短说明，或让 AI 帮你整理。"
+            />
+            <small>
+              {synopsisDirty.current
+                ? "编辑完成后自动保存"
+                : "让重要信息，一眼可见"}
+            </small>
+          </section>
+          <section id="source-media" className="media-section">
+            <div className="section-label">
+              <span>原始素材</span>
+              {primary && (
+                <span className="file-kind">
+                  {primary.data.type === "video" ? "VIDEO" : "AUDIO"}
+                </span>
+              )}
+            </div>
+            {primary ? (
+              <>
+                <div className="mobile-only compact-player">
+                  <button
+                    aria-label={playing ? "暂停播放" : "播放素材"}
+                    onClick={() => {
+                      if (player.current?.paused)
+                        void player.current
+                          .play()
+                          .catch(() => error("素材尚未就绪，请稍后播放。"));
+                      else player.current?.pause();
+                    }}
+                  >
+                    {playing ? <Pause size={20} /> : <Play size={20} />}
+                  </button>
+                  <span>
+                    <strong>{primary.data.name}</strong>
+                    <small>
+                      {stamp(primary.data.duration)} · {size(primary.data.size)}
+                    </small>
+                  </span>
+                  <button
+                    aria-label={playerFold ? "展开播放器" : "收起播放器"}
+                    onClick={() => setPlayerFold(!playerFold)}
+                  >
+                    {playerFold ? (
+                      <ChevronDown size={19} />
+                    ) : (
+                      <ChevronRight size={19} />
+                    )}
+                  </button>
+                </div>
+                <div
+                  className={`player-frame ${primary.data.type === "audio" ? "audio-player" : ""}`}
+                >
+                  {primary.data.type === "video" ? (
+                    <video
+                      playsInline
+                      onPlay={() => setPlaying(true)}
+                      onPause={() => setPlaying(false)}
+                      key={primary.id + primary.data.state}
+                      ref={(el) => {
+                        player.current = el;
+                      }}
+                      controls
+                      preload="metadata"
+                      src={`/api/assets/${primary.id}/media`}
+                    />
+                  ) : (
+                    <>
+                      <div className="audio-art">
+                        <div className="wave-bars">
+                          {Array.from({ length: 32 }, (_, i) => (
+                            <i
+                              key={i}
+                              style={{
+                                height: `${18 + Math.sin(i * 1.3) ** 2 * 48}%`,
+                              }}
+                            />
+                          ))}
+                        </div>
+                        <span>每一个声音，都有迹可循</span>
+                      </div>
+                      <audio
+                        onPlay={() => setPlaying(true)}
+                        onPause={() => setPlaying(false)}
                         key={primary.id + primary.data.state}
                         ref={(el) => {
                           player.current = el;
                         }}
                         controls
-                        preload="metadata"
                         src={`/api/assets/${primary.id}/media`}
                       />
-                    ) : (
-                      <>
-                        <div className="audio-art">
-                          <div className="wave-bars">
-                            {Array.from({ length: 32 }, (_, i) => (
-                              <i
-                                key={i}
-                                style={{
-                                  height: `${18 + Math.sin(i * 1.3) ** 2 * 48}%`,
-                                }}
-                              />
-                            ))}
-                          </div>
-                          <span>每一个声音，都有迹可循</span>
-                        </div>
-                        <audio
-                          key={primary.id + primary.data.state}
-                          ref={(el) => {
-                            player.current = el;
-                          }}
-                          controls
-                          src={`/api/assets/${primary.id}/media`}
-                        />
-                      </>
-                    )}
-                    {primary.data.state === "preparing" && (
-                      <div className="player-notice">
-                        <LoaderCircle className="spin" size={13} />
-                        正在准备兼容播放版本
-                      </div>
-                    )}
-                  </div>
-                  <div className="media-info">
-                    <span className="file-icon">
-                      {primary.data.type === "video" ? (
-                        <Film size={18} />
-                      ) : (
-                        <FileAudio2 size={18} />
-                      )}
-                    </span>
-                    <div>
-                      <strong title={primary.data.name}>
-                        {primary.data.name}
-                      </strong>
-                      <small>
-                        {stamp(primary.data.duration)}
-                        <span>·</span>
-                        {size(primary.data.size)}
-                      </small>
+                    </>
+                  )}
+                  {primary.data.state === "preparing" && (
+                    <div className="player-notice">
+                      <LoaderCircle className="spin" size={13} />
+                      正在准备兼容播放版本
                     </div>
-                    <a
-                      href={`/api/assets/${primary.id}/media?original=true`}
-                      target="_blank"
-                      rel="noreferrer"
-                      title="打开原始文件"
-                    >
-                      <MoreHorizontal size={17} />
-                    </a>
-                  </div>
-                </>
-              ) : (
-                <div
-                  className={`upload-area ${dragging ? "dragging" : ""}`}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setDragging(true);
-                  }}
-                  onDragLeave={() => setDragging(false)}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setDragging(false);
-                    const f = e.dataTransfer.files[0];
-                    if (f && snap) void attach(f);
-                  }}
-                >
-                  <span className="upload-symbol">
-                    {upload !== null ? (
-                      <LoaderCircle size={28} className="spin" />
+                  )}
+                </div>
+                <div className="media-info">
+                  <span className="file-icon">
+                    {primary.data.type === "video" ? (
+                      <Film size={18} />
                     ) : (
-                      <CloudUpload size={30} />
+                      <FileAudio2 size={18} />
                     )}
                   </span>
-                  <h3>
-                    {upload !== null
-                      ? `正在上传 · ${upload}%`
-                      : "把声音，变成清晰的文字"}
-                  </h3>
-                  <p>
-                    {upload !== null ? (
-                      "支持断点续传，请保持页面开启"
-                    ) : (
-                      <>
-                        将音视频拖放到这里
-                        <br />
-                        或从电脑中选择文件
-                      </>
-                    )}
-                  </p>
-                  {upload !== null ? (
-                    <div className="progress-track">
-                      <div style={{ width: upload + "%" }} />
-                    </div>
-                  ) : (
-                    <button
-                      className="button secondary"
-                      onClick={() => {
-                        if (!snap) void create();
-                        else file.current?.click();
-                      }}
-                    >
-                      <Plus size={15} />
-                      {snap ? "选择音视频文件" : "先新建一个项目"}
-                    </button>
-                  )}
-                  <small>MP4 / MOV / MP3 / WAV 等 · 最大 20 GB</small>
-                  <input
-                    ref={file}
-                    type="file"
-                    hidden
-                    accept=".mp4,.mov,.mkv,.webm,.avi,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void attach(f);
-                      e.target.value = "";
-                    }}
-                  />
+                  <div>
+                    <strong title={primary.data.name}>
+                      {primary.data.name}
+                    </strong>
+                    <small>
+                      {stamp(primary.data.duration)}
+                      <span>·</span>
+                      {size(primary.data.size)}
+                    </small>
+                  </div>
+                  <a
+                    href={`/api/assets/${primary.id}/media?original=true`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="打开原始文件"
+                  >
+                    <MoreHorizontal size={17} />
+                  </a>
                 </div>
-              )}
-            </section>
-            <section className="transcription-controls">
+              </>
+            ) : (
+              <div
+                className={`upload-area ${dragging ? "dragging" : ""}`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragging(true);
+                }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragging(false);
+                  const f = e.dataTransfer.files[0];
+                  if (f && snap) void attach(f, { id: snap.project.id });
+                }}
+              >
+                <span className="upload-symbol">
+                  {upload !== null ? (
+                    <LoaderCircle size={28} className="spin" />
+                  ) : (
+                    <CloudUpload size={30} />
+                  )}
+                </span>
+                <h3>
+                  {upload !== null
+                    ? `正在上传 · ${upload}%`
+                    : "把声音，变成清晰的文字"}
+                </h3>
+                <p>
+                  {upload !== null ? (
+                    "支持断点续传，请保持页面开启"
+                  ) : (
+                    <>
+                      {mobile
+                        ? "选择手机里的录音文件或视频"
+                        : "将音视频拖放到这里，或从电脑中选择文件"}
+                    </>
+                  )}
+                </p>
+                {upload !== null ? (
+                  <div className="progress-track">
+                    <div style={{ width: upload + "%" }} />
+                  </div>
+                ) : (
+                  <button
+                    className="button secondary"
+                    disabled={uploadBusy}
+                    onClick={() => {
+                      if (!snap && !mobile) void create();
+                      else
+                        chooseFile(
+                          snap?.project.id,
+                          uploadState?.projectId === pid
+                            ? uploadState.fingerprint
+                            : undefined,
+                        );
+                    }}
+                  >
+                    <Plus size={15} />
+                    {mobile || snap ? "选择音视频文件" : "先新建一个项目"}
+                  </button>
+                )}
+                <small>MP4 / MOV / MP3 / WAV 等 · 最大 20 GB</small>
+              </div>
+            )}
+          </section>
+          <section className="transcription-controls">
+            <div className="start-card">
               <button
                 className="button primary start-button"
                 disabled={
                   !primary ||
+                  primary.data.state !== "ready" ||
+                  starting ||
+                  upload !== null ||
                   !!transcriptionRunning ||
                   transcribeJob?.data.state === "complete"
                 }
-                onClick={() => {
-                  setTextTab("text");
-                  if (
-                    transcribeJob &&
-                    ["failed", "cancelled"].includes(transcribeJob.data.state)
-                  )
-                    void action(`/jobs/${transcribeJob.id}/retry`);
-                  else void action(`/projects/${pid}/transcribe`);
-                }}
+                onClick={() => void startTranscription()}
               >
                 {transcriptionRunning ? (
                   <LoaderCircle size={17} className="spin" />
@@ -775,20 +1079,41 @@ export default function App() {
                 ) : (
                   <Play size={17} fill="currentColor" />
                 )}
-                {transcriptionRunning
-                  ? "正在转录"
-                  : transcribeJob?.data.state === "complete"
-                    ? "转录已完成"
-                    : transcribeJob
-                      ? "继续转录"
-                      : primary && !primary.data.has_audio
-                        ? "提取画面文字"
-                        : "开始转录"}
+                {starting
+                  ? "正在提交"
+                  : primary?.data.state === "preparing"
+                    ? "素材准备中"
+                    : transcriptionRunning
+                      ? "正在转录"
+                      : transcribeJob?.data.state === "complete"
+                        ? "转录已完成"
+                        : transcribeJob
+                          ? "继续转录"
+                          : primary && !primary.data.has_audio
+                            ? "提取画面文字"
+                            : "开始转录"}
               </button>
               <div className="start-hint">
                 <ShieldCheck size={12} />
                 音视频与画面均在本地处理
               </div>
+              <div className="mobile-only mode-summary">
+                <span>
+                  {settings.ai_enabled
+                    ? "AI 上下文修订已开启"
+                    : "本地转写 · 无需 AI"}
+                </span>
+                <button onClick={() => openFeature("settings")}>
+                  调整设置
+                </button>
+              </div>
+              {primary?.data.state === "preparing" && (
+                <p className="mobile-only preparation-hint">
+                  正在处理音视频，完成后即可开始转写。
+                </p>
+              )}
+            </div>
+            <div className="mobile-function-settings">
               <div className="ai-setting-row">
                 <div className="ai-setting-label">
                   <span className="ai-setting-icon">
@@ -926,77 +1251,74 @@ export default function App() {
                   </label>
                 </div>
               )}
-            </section>
-            {activeJobs.length > 0 && (
-              <section className="jobs">
-                <div className="section-label">
-                  <span>处理进度</span>
-                  <small>
-                    {
-                      activeJobs.filter((j) => j.data.state === "running")
-                        .length
-                    }{" "}
-                    个运行中
-                  </small>
-                </div>
-                {activeJobs.slice(-12).map((j) => (
-                  <div className={`job ${j.data.state}`} key={j.id}>
-                    <div>
-                      <span>
-                        {j.data.state === "running" ? (
-                          <LoaderCircle size={12} className="spin" />
-                        ) : j.data.state === "failed" ? (
-                          <CircleHelp size={12} />
-                        ) : (
-                          <span className="job-dot" />
-                        )}
-                        {j.data.stage}
-                      </span>
-                      {["queued", "running"].includes(j.data.state) ? (
-                        <button
-                          title="停止任务"
-                          onClick={() => void action(`/jobs/${j.id}/cancel`)}
-                        >
-                          <Square size={11} />
-                        </button>
+            </div>
+          </section>
+          {activeJobs.length > 0 && (
+            <section className="jobs">
+              <div className="section-label">
+                <span>处理进度</span>
+                <small>
+                  {activeJobs.filter((j) => j.data.state === "running").length}{" "}
+                  个运行中
+                </small>
+              </div>
+              {activeJobs.slice(-12).map((j) => (
+                <div className={`job ${j.data.state}`} key={j.id}>
+                  <div>
+                    <span>
+                      {j.data.state === "running" ? (
+                        <LoaderCircle size={12} className="spin" />
+                      ) : j.data.state === "failed" ? (
+                        <CircleHelp size={12} />
                       ) : (
-                        <button
-                          onClick={() => void action(`/jobs/${j.id}/retry`)}
-                        >
-                          <RotateCcw size={12} />
-                          重试
-                        </button>
+                        <span className="job-dot" />
                       )}
-                    </div>
-                    {j.data.state === "running" && (
-                      <div className="progress-track">
-                        <div
-                          style={{
-                            width: Math.max(2, j.data.progress * 100) + "%",
-                          }}
-                        />
-                      </div>
+                      {j.data.stage}
+                    </span>
+                    {["queued", "running"].includes(j.data.state) ? (
+                      <button
+                        title="停止任务"
+                        onClick={() => void action(`/jobs/${j.id}/cancel`)}
+                      >
+                        <Square size={11} />
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => void action(`/jobs/${j.id}/retry`)}
+                      >
+                        <RotateCcw size={12} />
+                        重试
+                      </button>
                     )}
-                    {j.data.error && <p>{j.data.error}</p>}
                   </div>
-                ))}
-              </section>
-            )}
-            <div className="workflow-note">
-              <div>
-                <span>01</span>本地识别
-              </div>
-              <ChevronRight size={10} />
-              <div>
-                <span>02</span>上下文修订
-              </div>
-              <ChevronRight size={10} />
-              <div>
-                <span>03</span>提取与图谱
-              </div>
+                  {j.data.state === "running" && (
+                    <div className="progress-track">
+                      <div
+                        style={{
+                          width: Math.max(2, j.data.progress * 100) + "%",
+                        }}
+                      />
+                    </div>
+                  )}
+                  {j.data.error && <p>{j.data.error}</p>}
+                </div>
+              ))}
+            </section>
+          )}
+          <div className="workflow-note">
+            <div>
+              <span>01</span>本地识别
+            </div>
+            <ChevronRight size={10} />
+            <div>
+              <span>02</span>上下文修订
+            </div>
+            <ChevronRight size={10} />
+            <div>
+              <span>03</span>提取与图谱
             </div>
           </div>
-        )}
+        </div>
         <footer className="control-footer">
           <span className={`status-dot ${connected ? "" : "offline"}`} />
           {connected ? "实时更新已连接" : "连接中断，正在重连"}
@@ -1008,6 +1330,115 @@ export default function App() {
         className="column-divider"
         onPointerDown={(e) => resize(e, "middle")}
       />
+      {activeJobs.length > 0 && (
+        <div className="mobile-progress">
+          {(activeJobs
+            .filter((j) => ["running", "queued"].includes(j.data.state))
+            .slice(0, 1).length
+            ? activeJobs
+                .filter((j) => ["running", "queued"].includes(j.data.state))
+                .slice(0, 1)
+            : activeJobs.slice(-1)
+          ).map((j) => (
+            <div className={`job ${j.data.state}`} key={j.id}>
+              <div>
+                <span>{j.data.stage}</span>
+                {["running", "queued"].includes(j.data.state) ? (
+                  <button onClick={() => void action(`/jobs/${j.id}/cancel`)}>
+                    停止
+                  </button>
+                ) : (
+                  <button onClick={() => void action(`/jobs/${j.id}/retry`)}>
+                    重试
+                  </button>
+                )}
+              </div>
+              {j.data.state === "running" && (
+                <div className="progress-track">
+                  <div
+                    style={{ width: Math.max(2, j.data.progress * 100) + "%" }}
+                  />
+                </div>
+              )}
+              {j.data.error && <p>{j.data.error}</p>}
+              {activeJobs.filter((x) =>
+                ["running", "queued"].includes(x.data.state),
+              ).length > 1 && <small>还有其他处理任务，结果将继续更新</small>}
+            </div>
+          ))}
+        </div>
+      )}
+      <button
+        id="mobile-more-toggle"
+        className="mobile-more-toggle"
+        aria-expanded={moreOpen}
+        onClick={() => setMoreOpen(!moreOpen)}
+      >
+        <SlidersHorizontal size={17} />
+        更多功能
+        <span className="grow" />
+        {moreOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
+      </button>
+      <div className="mobile-feature-headings">
+        {[
+          ["settings", "转写与 AI 设置"],
+          ["metadata", "标题与梗概"],
+          ["notes", "笔记与附件"],
+          ["extract", "内容提取"],
+          ["chat", "内容问答"],
+          ["diagram", "内容图谱"],
+        ].map(([kind, label], i) => (
+          <button
+            key={kind}
+            id={"mobile-feature-" + kind}
+            className="mobile-feature-heading"
+            style={{ order: 60 + i * 2 }}
+            aria-expanded={mobileSection === kind}
+            onClick={() => setMobileSection(mobileSection === kind ? "" : kind)}
+          >
+            <span>{label}</span>
+            <small>{featureStatus(kind)}</small>
+            {mobileSection === kind ? (
+              <ChevronDown size={17} />
+            ) : (
+              <ChevronRight size={17} />
+            )}
+          </button>
+        ))}
+      </div>
+      {uploadState && uploadState.phase !== "complete" && (
+        <div className="upload-status" role="status">
+          <strong>
+            {uploadState.name} ·{" "}
+            {uploadBusy ? `${uploadState.progress}%` : "上传未完成"}
+          </strong>
+          {uploadBusy ? (
+            <>
+              <progress max="100" value={uploadState.progress} />
+              <small>上传时请保持页面开启；开始转写后可离开页面。</small>
+            </>
+          ) : (
+            <p>{uploadState.error}</p>
+          )}
+          {uploadState.projectId && uploadState.projectId !== pid && (
+            <button onClick={() => selectProject(uploadState.projectId)}>
+              查看上传项目
+            </button>
+          )}
+          {!uploadBusy && (
+            <button
+              onClick={() =>
+                chooseFile(
+                  uploadState.projectId || undefined,
+                  uploadState.fingerprint,
+                )
+              }
+            >
+              重新选择同一文件继续
+            </button>
+          )}
+        </div>
+      )}
       <section
         className="right-column"
         ref={right}
@@ -1072,43 +1503,52 @@ export default function App() {
               <PanelBottomClose size={15} />
             </button>
           </header>
-          {rightMax !== "text" &&
-            (snap ? (
-              upperTab === "chat" ? (
-                <RecordingChat
-                  key={pid}
-                  snap={snap}
-                  seek={seek}
-                  refresh={() => void refresh()}
-                  error={error}
-                  onExtract={() => {
-                    setTextTab("extract");
-                    setRightMax("");
-                  }}
-                  onConfigure={() => setSettingsOpen(true)}
-                />
-              ) : (
-                <Notes
-                  key={pid}
-                  pid={pid}
-                  value={snap.project.data.notes}
-                  version={snap.project.data.notes_version || 0}
-                  assets={snap.assets.filter(
-                    (a) => a.data.role === "supplement",
-                  )}
-                  refresh={() => void refresh()}
-                  error={error}
-                />
-              )
+          <div
+            className="mobile-function-notes notes-content"
+            hidden={!mobile && (rightMax === "text" || upperTab !== "notes")}
+          >
+            {snap ? (
+              <Notes
+                key={pid}
+                pid={pid}
+                value={snap.project.data.notes}
+                version={snap.project.data.notes_version || 0}
+                assets={snap.assets.filter((a) => a.data.role === "supplement")}
+                refresh={() => void refresh()}
+                error={error}
+              />
             ) : (
               <div className="notes-placeholder">
-                {upperTab === "chat"
-                  ? "完成内容提取后，可在这里询问录音内容。"
-                  : "为想法留一处空间。"}
-                <br />
-                <span>新建项目后，可以写笔记、放图片、添加音视频。</span>
+                选择素材后，可以写笔记、放图片和添加附件。
               </div>
-            ))}
+            )}
+          </div>
+          <div
+            className="mobile-function-chat chat-content"
+            hidden={!mobile && (rightMax === "text" || upperTab !== "chat")}
+          >
+            {snap ? (
+              <RecordingChat
+                key={pid}
+                snap={snap}
+                seek={seek}
+                refresh={() => void refresh()}
+                error={error}
+                onExtract={() => {
+                  if (mobile) openFeature("extract");
+                  else {
+                    setTextTab("extract");
+                    setRightMax("");
+                  }
+                }}
+                onConfigure={() => setSettingsOpen(true)}
+              />
+            ) : (
+              <div className="notes-placeholder">
+                完成内容提取后，可在这里询问录音内容。
+              </div>
+            )}
+          </div>
         </section>
         <div
           className="row-divider"
@@ -1116,7 +1556,10 @@ export default function App() {
         >
           <span />
         </div>
-        <section className="text-panel">
+        <section
+          className="text-panel"
+          data-desktop-collapsed={rightMax === "notes"}
+        >
           <button
             className="text-max icon-button"
             title={rightMax === "text" ? "恢复布局" : "放大正文"}
@@ -1128,24 +1571,32 @@ export default function App() {
               <Maximize2 size={14} />
             )}
           </button>
-          {rightMax === "notes" ? (
+          {rightMax === "notes" && !mobile && (
             <div className="collapsed-label">
               <FileText size={15} />
               转录正文
             </div>
-          ) : snap ? (
+          )}
+          {snap ? (
             <Transcript
               key={pid}
               snap={snap}
               seek={seek}
               refresh={() => void refresh()}
               error={error}
+              mobile={mobile}
+              moreOpen={moreOpen}
+              mobileSection={mobileSection}
+              scrollRoot={layout}
+              onConfigure={() =>
+                mobile ? openFeature("settings") : setMiddleTab("source")
+              }
               tab={textTab}
               setTab={setTextTab}
               onGenerate={(k, t, i) => void generate(k, t, i)}
             />
           ) : (
-            <>
+            <section className="transcript-view">
               <div className="transcript-tabs">
                 <div className="tabs">
                   <button className="active muted-tab">
@@ -1190,7 +1641,7 @@ export default function App() {
                   </span>
                 </div>
               </div>
-            </>
+            </section>
           )}
         </section>
       </section>

@@ -51,12 +51,34 @@ export async function uploadFile(
   progress: (n: number) => void,
 ) {
   const fingerprint = `${file.name}|${file.size}|${file.lastModified}`;
-  const u: Rec = await api(`/projects/${pid}/uploads`, "POST", {
-    name: file.name,
-    size: file.size,
-    role,
-    fingerprint,
-  });
+  const cacheKey = `chengtin-upload-session:${pid}:${role}`;
+  let saved: { id: string; fingerprint: string } | undefined;
+  try {
+    saved = JSON.parse(localStorage.getItem(cacheKey) || "null");
+  } catch {
+    /* Storage may be unavailable in private browsing. */
+  }
+  // Retain the upload ID across refreshes, including a lost completion response.
+  const u: Rec =
+    saved?.fingerprint === fingerprint
+      ? await api(`/uploads/${saved.id}`)
+      : await api(`/projects/${pid}/uploads`, "POST", {
+          name: file.name,
+          size: file.size,
+          role,
+          fingerprint,
+        });
+  if (
+    u.project_id !== pid ||
+    u.data.fingerprint !== fingerprint ||
+    u.data.role !== role
+  )
+    throw new Error("上传记录与所选文件不一致，请重新选择文件。");
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify({ id: u.id, fingerprint }));
+  } catch {
+    /* Upload still works without storage. */
+  }
   const d = u.data;
   for (let i = 0; i < d.count; i++) {
     if (!(String(i) in d.received)) {
@@ -87,6 +109,11 @@ export async function uploadFile(
     progress(Math.min(99, Math.round(((i + 1) / d.count) * 99)));
   }
   const result: Rec = await api(`/uploads/${u.id}/complete`, "POST");
+  try {
+    localStorage.removeItem(cacheKey);
+  } catch {
+    /* Optional cache. */
+  }
   progress(100);
   return result;
 }
@@ -112,4 +139,13 @@ export function downloadBlob(content: BlobPart, name: string, type: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+export function downloadFile(url: string) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }

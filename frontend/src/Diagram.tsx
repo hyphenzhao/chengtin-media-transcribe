@@ -42,12 +42,14 @@ export default function Diagram({
   busy,
   stale,
   jobError,
+  disabledReason,
 }: {
   item?: Rec;
   onGenerate: (instruction: string, type: string) => void;
   busy: boolean;
   stale: boolean;
   jobError?: string;
+  disabledReason?: string;
 }) {
   const [download, setDownload] = useState<{
     url: string;
@@ -59,6 +61,37 @@ export default function Diagram({
     [instruction, setInstruction] = useState(""),
     [type, setType] = useState("auto");
   const area = useRef<HTMLDivElement>(null);
+  const [bounds, setBounds] = useState({ width: 1200, height: 800 });
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    const canvas = area.current;
+    if (!canvas || !svg) return;
+    const fit = () => {
+      if (canvas.clientWidth < 40 || canvas.clientHeight < 40) return;
+      setZoom(
+        Math.max(
+          0.02,
+          Math.min(
+            1,
+            (canvas.clientWidth - 36) / bounds.width,
+            (canvas.clientHeight - 36) / bounds.height,
+          ),
+        ),
+      );
+    };
+    const observer = new ResizeObserver(fit);
+    observer.observe(canvas);
+    fit();
+    return () => observer.disconnect();
+  }, [svg, bounds.width, bounds.height]);
+  useEffect(() => {
+    if (!fullscreen) return;
+    const close = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullscreen(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [fullscreen]);
   useEffect(() => {
     let cancelled = false;
     if (!item?.data.mermaid) {
@@ -76,14 +109,7 @@ export default function Diagram({
             .documentElement.getAttribute("viewBox")
             ?.split(/\s+/)
             .map(Number);
-          if (box && area.current)
-            setZoom(
-              Math.min(
-                1,
-                (area.current.clientWidth - 32) / box[2],
-                (area.current.clientHeight - 32) / box[3],
-              ),
-            );
+          if (box) setBounds({ width: box[2], height: box[3] });
         }
       })
       .catch(() => {
@@ -151,7 +177,16 @@ export default function Diagram({
     img.src = url;
   }
   return (
-    <div className="diagram-panel">
+    <div
+      className={`diagram-panel ${fullscreen ? "diagram-fullscreen" : ""}`}
+      role={fullscreen ? "dialog" : undefined}
+      aria-label={fullscreen ? "内容图谱全屏" : undefined}
+    >
+      {fullscreen && (
+        <button className="diagram-close" onClick={() => setFullscreen(false)}>
+          退出全屏 ✕
+        </button>
+      )}
       <div className="diagram-intro">
         <span className="eyebrow">从内容到结构</span>
         <h2>让思路清晰可见</h2>
@@ -172,9 +207,18 @@ export default function Diagram({
         {svg ? (
           <div
             className="svg-stage"
-            style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}
-            dangerouslySetInnerHTML={{ __html: svg }}
-          />
+            style={{ width: bounds.width * zoom, height: bounds.height * zoom }}
+          >
+            <div
+              className="svg-content"
+              style={{
+                width: bounds.width,
+                height: bounds.height,
+                transform: `scale(${zoom})`,
+              }}
+              dangerouslySetInnerHTML={{ __html: svg }}
+            />
+          </div>
         ) : (
           <div className="empty-small">
             {busy ? (
@@ -183,29 +227,23 @@ export default function Diagram({
               <GitBranch size={34} />
             )}
             <strong>{busy ? "正在整理内容结构" : "等待生成内容图谱"}</strong>
-            <p>{renderError || "先在右侧「内容提取」中生成一份摘要或纪要。"}</p>
+            <p>{renderError || "先在「内容提取」中生成一份摘要或纪要。"}</p>
           </div>
         )}
       </div>
       {svg && (
         <div className="diagram-tools">
           <button
-            onClick={() => setZoom(Math.max(0.25, zoom - 0.15))}
+            onClick={() => setZoom(Math.max(0.02, zoom / 1.3))}
             title="缩小"
           >
             <Minus size={16} />
           </button>
           <span>{Math.round(zoom * 100)}%</span>
-          <button
-            onClick={() => setZoom(Math.min(3, zoom + 0.15))}
-            title="放大"
-          >
+          <button onClick={() => setZoom(Math.min(3, zoom * 1.3))} title="放大">
             <Plus size={16} />
           </button>
-          <button
-            onClick={() => area.current?.requestFullscreen()}
-            title="全屏"
-          >
+          <button onClick={() => setFullscreen(true)} title="全屏">
             <Maximize2 size={16} />
           </button>
           <span className="grow" />
@@ -227,6 +265,7 @@ export default function Diagram({
           </a>
         </div>
       )}
+      {disabledReason && <div className="notice">{disabledReason}</div>}
       <div className="diagram-form">
         <select value={type} onChange={(e) => setType(e.target.value)}>
           <option value="auto">自动选择图表类型</option>
@@ -241,7 +280,7 @@ export default function Diagram({
         />
         <button
           className="button secondary"
-          disabled={busy}
+          disabled={busy || !!disabledReason}
           onClick={() => onGenerate(instruction, type)}
         >
           <RotateCcw size={15} />
